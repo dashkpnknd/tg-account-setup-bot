@@ -1,0 +1,14 @@
+[Unit]
+Description=TG Account Setup Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/github-sync/tg-account-setup-bot
+ExecStart=/root/github-sync/tg-account-setup-bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

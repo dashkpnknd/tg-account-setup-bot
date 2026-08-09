@@ -1,0 +1,8 @@
+.env
+data/
+downloads/
+.venv/
+__pycache__/
+*.py[cod]
+*.session*
+.DS_Store
