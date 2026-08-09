@@ -359,7 +359,7 @@ async def process_account(chat_id: int, admin_id: int, account_id: int) -> None:
         email_code_waiters[admin_id] = future
         state[admin_id] = ("email_code", account_id)
 
-        async def code_provider() -> str:
+        async def code_provider(_code_length: int = 0) -> str:
             return await asyncio.wait_for(future, timeout=15 * 60)
 
         await set_password_and_email(
