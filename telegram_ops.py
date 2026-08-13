@@ -180,6 +180,17 @@ async def clone_profile_and_channel(
     await progress("Копирую имя и описание профиля")
     await client(functions.account.UpdateProfileRequest(first_name=first_name, last_name=last_name, about=bio))
 
+    # Premium badge is shown by Telegram automatically. The additional custom
+    # Premium emoji next to the name is stored in `emoji_status`; replicate it
+    # from the source whenever it has one.
+    emoji_status = getattr(source_profile, "emoji_status", None)
+    if emoji_status:
+        try:
+            await client(functions.account.UpdateEmojiStatusRequest(emoji_status=emoji_status))
+            await progress("Скопирован Premium эмодзи-статус")
+        except Exception:
+            await progress("Не удалось скопировать Premium эмодзи-статус — продолжаю оформление")
+
     account_username, channel_username = await choose_usernames(client, username_seed)
     await client(functions.account.UpdateUsernameRequest(account_username))
     await progress(f"Username профиля: @{account_username}")
