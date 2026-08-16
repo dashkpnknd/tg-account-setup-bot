@@ -5,6 +5,7 @@ import contextlib
 import io
 import logging
 import os
+import random
 import tempfile
 from pathlib import Path
 
@@ -31,6 +32,12 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_IDS = {int(item) for item in os.environ.get("ADMIN_IDS", "").split(",") if item.strip().isdigit()}
 STORY_INTERVAL = max(0, int(os.environ.get("STORY_INTERVAL_MINUTES", "15")))
+DEFAULT_ACCESS_TEMPLATE = (
+    "{phone}\n@{username}\n\n"
+    "логин: {phone}\nпароль: {password}\n\n"
+    "почта для входа: {email}\nпароль: {email_password}"
+)
+BUSINESS_EMOJIS = ("💼", "📊", "📈", "📌", "📋", "🗂️", "🗓️", "📝", "🤝", "🏢", "💻", "📎", "🔖", "🧩", "🛠️")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("Заполните API_ID, API_HASH и BOT_TOKEN в .env")
@@ -120,15 +127,20 @@ async def settings(callback: CallbackQuery) -> None:
     seed = store.get_setting("username_seed", "tgprofile")
     report = store.get_setting("report_channel", "не задан")
     password = "задан" if store.get_setting("new_password") else "не задан"
+    access_template = "индивидуальный" if store.get_setting("access_template") else "стандартный"
     await safe_edit(
         callback,
         "Общие настройки\n\n"
         "Источник выбирается через проект: у проекта один привязанный аккаунт, "
         "а его личный канал определяется автоматически.\n\n"
-        f"Основа username: {seed}\nКанал «Telegram доступ»: {report}\nНовый пароль: {password}",
+        f"Основа username: {seed}\nКанал «Telegram доступ»: {report}\n"
+        f"Формат доступов: {access_template}\nНовый пароль: {password}\n\n"
+        f"Username: {seed} + 2 случайные цифры; канал: {seed}_ch + те же цифры.\n"
+        "К имени каждого нового аккаунта добавляется уникальный деловой эмодзи.",
         kb(
             ("🔤 Основа username", "set_username_seed"),
             ("📬 Канал с доступами", "set_report_channel"),
+            ("📄 Формат доступов", "set_access_template"),
             ("🔐 Новый пароль", "set_new_password"),
             ("◀️ В меню", "home"),
         ),
@@ -137,7 +149,12 @@ async def settings(callback: CallbackQuery) -> None:
 
 SETTING_ACTIONS = {
     "set_username_seed": ("username_seed", "Пришлите основу для username, например appiphone."),
-    "set_report_channel": ("report_channel", "Пришлите @username или ID закрытого канала «Telegram доступ». Бот должен быть в нём администратором."),
+    "set_report_channel": ("report_channel", "Пришлите @username или ID закрытого канала «Telegram доступ», либо перешлите из него любое сообщение. Бот должен быть в нём администратором."),
+    "set_access_template": (
+        "access_template",
+        "Пришлите шаблон сообщения с полями: {phone}, {username}, {password}, {email}, {email_password}, {project}.\n\n"
+        "Пример:\nПроект: {project}\nЛогин: {phone}\nПароль: {password}\nПочта: {email}\nПароль почты: {email_password}",
+    ),
     "set_new_password": ("new_password", "Пришлите новый пароль Telegram 2FA. Сообщение будет удалено после сохранения."),
 }
 
@@ -311,7 +328,7 @@ async def account_menu(callback: CallbackQuery) -> None:
     await safe_edit(
         callback,
         f"Аккаунт №{account_id}\nТелефон: {row['phone']}\nСтатус: {row['status']}\n"
-        f"Username: @{row['username'] or '—'}\nКанал: @{row['channel_username'] or '—'}\n"
+        f"Username: @{row['username'] or '—'}\nИмя: {row['name_emoji'] or '—'}\nКанал: @{row['channel_username'] or '—'}\n"
         f"Почта: {row['email'] or '—'}",
         kb(
             ("▶️ Запустить оформление", f"run:{account_id}"),
@@ -395,6 +412,11 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
     if not project:
         return
     source_client = client_from_session(project["session"], API_ID, API_HASH)
+    name_emoji = row["name_emoji"] or next(
+        (emoji for emoji in random.sample(BUSINESS_EMOJIS, len(BUSINESS_EMOJIS)) if emoji not in store.used_name_emojis()),
+        random.choice(BUSINESS_EMOJIS),
+    )
+    store.update_account(account_id, name_emoji=name_emoji)
 
     async def progress(text: str) -> None:
         await progress_message(chat_id, f"Аккаунт №{account_id}: {text}")
@@ -409,6 +431,7 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
             client,
             source_client,
             store.get_setting("username_seed"),
+            name_emoji,
             STORY_INTERVAL,
             progress,
         )
@@ -430,7 +453,7 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
         )
         store.update_account(account_id, status="готов", error=None)
         final = store.account(account_id)
-        await publish_result(chat_id, final)
+        await publish_result(chat_id, final, project["name"])
     except Exception as exc:
         log.exception("Setup failed for account %s", account_id)
         store.update_account(account_id, status="ошибка", error=str(exc)[:900])
@@ -445,14 +468,20 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
             await source_client.disconnect()
 
 
-async def publish_result(chat_id: int, row) -> None:
-    card = (
-        f"{row['phone']}\n@{row['username']}\n\n"
-        f"логин: {row['phone']}\n"
-        f"пароль: {store.get_setting('new_password')}\n\n"
-        f"почта для входа: {row['email']}\n"
-        f"пароль: {row['email_password']}"
-    )
+async def publish_result(chat_id: int, row, project_name: str) -> None:
+    template = store.get_setting("access_template") or DEFAULT_ACCESS_TEMPLATE
+    try:
+        card = template.format(
+            phone=row["phone"], username=row["username"] or "—",
+            password=store.get_setting("new_password"), email=row["email"] or "—",
+            email_password=row["email_password"] or "—", project=project_name,
+        )
+    except (KeyError, ValueError):
+        card = DEFAULT_ACCESS_TEMPLATE.format(
+            phone=row["phone"], username=row["username"] or "—",
+            password=store.get_setting("new_password"), email=row["email"] or "—",
+            email_password=row["email_password"] or "—", project=project_name,
+        )
     await bot.send_message(chat_id, "✅ Аккаунт оформлен.\n\n" + card)
     report = store.get_setting("report_channel")
     await bot.send_message(report, card)
@@ -490,6 +519,8 @@ async def text_input(message: Message) -> None:
     value = message.text.strip()
     if kind.startswith("setting:"):
         key = kind.split(":", 1)[1]
+        if key == "report_channel" and message.forward_from_chat:
+            value = str(message.forward_from_chat.id)
         store.set_setting(key, value)
         if key == "new_password":
             with contextlib.suppress(Exception):

@@ -48,6 +48,7 @@ class Store:
                     session TEXT NOT NULL,
                     old_password TEXT,
                     username TEXT,
+                    name_emoji TEXT,
                     channel_username TEXT,
                     channel_id INTEGER,
                     email TEXT,
@@ -66,6 +67,9 @@ class Store:
                 );
                 """
             )
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(accounts)")}
+            if "name_emoji" not in columns:
+                db.execute("ALTER TABLE accounts ADD COLUMN name_emoji TEXT")
 
     def get_setting(self, key: str, default: str = "") -> str:
         with self._db() as db:
@@ -140,9 +144,13 @@ class Store:
         with self._db() as db:
             return {int(row["source_account_id"]) for row in db.execute("SELECT source_account_id FROM projects")}
 
+    def used_name_emojis(self) -> set[str]:
+        with self._db() as db:
+            return {row["name_emoji"] for row in db.execute("SELECT name_emoji FROM accounts WHERE name_emoji IS NOT NULL")}
+
     def update_account(self, account_id: int, **fields: object) -> None:
         allowed = {
-            "old_password", "username", "channel_username", "channel_id", "email",
+            "old_password", "username", "name_emoji", "channel_username", "channel_id", "email",
             "email_password", "status", "error", "session",
         }
         values = {key: value for key, value in fields.items() if key in allowed}
