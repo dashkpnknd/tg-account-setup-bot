@@ -51,8 +51,10 @@ def random_username(base: str, channel: bool = False) -> str:
 async def choose_usernames(client: TelegramClient, base: str) -> tuple[str, str]:
     """Reserve distinct, readable usernames after Telegram checks availability."""
     for _ in range(60):
-        account_name = random_username(base)
-        channel_name = random_username(base, channel=True)
+        clean_base = username_base(base)
+        suffix = "".join(random.choices("23456789", k=4))
+        account_name = f"{clean_base[:27]}_{suffix}"[:32]
+        channel_name = f"{clean_base[:23]}_ch_{suffix}"[:32]
         try:
             account_free = await client(functions.account.CheckUsernameRequest(account_name))
             if not account_free:
@@ -62,6 +64,11 @@ async def choose_usernames(client: TelegramClient, base: str) -> tuple[str, str]
         except (UsernameInvalidError, UsernameOccupiedError):
             continue
     raise RuntimeError("Не удалось подобрать свободный username за 60 попыток")
+
+
+async def _human_pause() -> None:
+    """Spread account changes over small, natural-looking editing intervals."""
+    await asyncio.sleep(random.uniform(2.5, 6.5))
 
 
 async def _photo_path(client: TelegramClient, entity: object, directory: Path, name: str) -> Path | None:
@@ -84,12 +91,17 @@ async def _copy_channel_posts(source_client: TelegramClient, target_client: Tele
                 if not media_path:
                     continue
                 try:
-                    await target_client.send_file(target, media_path, caption=message.message or "")
+                await target_client.send_file(
+                    target, media_path, caption=message.message or "",
+                    formatting_entities=message.entities or [],
+                )
                 finally:
                     with contextlib.suppress(OSError):
                         Path(media_path).unlink()
             elif message.message:
-                await target_client.send_message(target, message.message)
+                await target_client.send_message(
+                    target, message.message, formatting_entities=message.entities or [],
+                )
             else:
                 continue
             copied += 1
@@ -209,11 +221,19 @@ async def clone_profile_and_channel(
     )
     if not source_channel:
         source_channel = await source_client.get_entity(types.PeerChannel(source_channel_id))
-    bio = getattr(getattr(source_full, "full_user", None), "about", "") or ""
+    bio = getattr(source_full, "about", "") or ""
     first_name = getattr(source_profile, "first_name", "") or "Telegram"
     last_name = getattr(source_profile, "last_name", "") or ""
     await progress("Копирую имя и описание профиля")
     await client(functions.account.UpdateProfileRequest(first_name=f"{first_name} {name_emoji}", last_name=last_name, about=bio))
+    await _human_pause()
+
+    profile_color = getattr(source_profile, "profile_color", None)
+    if profile_color:
+        with contextlib.suppress(Exception):
+            await client(functions.account.UpdateColorRequest(for_profile=True, color=profile_color))
+            await progress("Скоплены цвета профиля")
+            await _human_pause()
 
     # Premium badge is shown by Telegram automatically. The additional custom
     # Premium emoji next to the name is stored in `emoji_status`; replicate it
@@ -223,12 +243,14 @@ async def clone_profile_and_channel(
         try:
             await client(functions.account.UpdateEmojiStatusRequest(emoji_status=emoji_status))
             await progress("Скопирован Premium эмодзи-статус")
+            await _human_pause()
         except Exception:
             await progress("Не удалось скопировать Premium эмодзи-статус — продолжаю оформление")
 
     account_username, channel_username = await choose_usernames(client, username_seed)
     await client(functions.account.UpdateUsernameRequest(account_username))
     await progress(f"Username профиля: @{account_username}")
+    await _human_pause()
 
     temp_dir = Path(tempfile.mkdtemp(prefix="tg_setup_"))
     try:
@@ -236,6 +258,7 @@ async def clone_profile_and_channel(
         if profile_photo:
             file = await client.upload_file(profile_photo)
             await client(functions.photos.UploadProfilePhotoRequest(file=file))
+            await _human_pause()
 
         channel_title = getattr(source_channel, "title", "") or first_name
         source_channel_full = await source_client(functions.channels.GetFullChannelRequest(source_channel))
@@ -244,6 +267,7 @@ async def clone_profile_and_channel(
             functions.channels.CreateChannelRequest(title=channel_title, about=channel_about, megagroup=False)
         )
         channel = created.chats[0]
+        await _human_pause()
         for attempt in range(20):
             candidate = channel_username if attempt == 0 else f"{channel_username[:28]}{attempt + 1}"
             try:
@@ -251,6 +275,7 @@ async def clone_profile_and_channel(
                 if available:
                     await client(functions.channels.UpdateUsernameRequest(channel=channel, username=candidate))
                     channel_username = candidate
+                    await _human_pause()
                     break
             except (UsernameInvalidError, UsernameOccupiedError):
                 continue
@@ -259,12 +284,19 @@ async def clone_profile_and_channel(
 
         channel_photo = await _photo_path(source_client, source_channel, temp_dir, "channel.jpg")
         if channel_photo:
-            await client(
+                await client(
                 functions.channels.EditPhotoRequest(
                     channel=channel,
                     photo=types.InputChatUploadedPhoto(file=await client.upload_file(channel_photo)),
                 )
             )
+            # Telegram creates a separate "photo updated" service event. It is
+            # not part of the source content, so remove it when the API permits.
+            with contextlib.suppress(Exception):
+                recent = [m.id async for m in client.iter_messages(channel, limit=8) if m.action and "EditPhoto" in type(m.action).__name__]
+                if recent:
+                    await client(functions.channels.DeleteMessagesRequest(channel=channel, id=recent))
+            await _human_pause()
 
         await progress("Копирую посты канала")
         post_count = await _copy_channel_posts(source_client, client, source_channel, channel, progress)
