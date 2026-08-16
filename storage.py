@@ -121,6 +121,11 @@ class Store:
         with self._db() as db:
             db.execute("INSERT OR IGNORE INTO admins(user_id) VALUES (?)", (user_id,))
 
+    def first_admin_id(self) -> int | None:
+        with self._db() as db:
+            row = db.execute("SELECT user_id FROM admins ORDER BY user_id LIMIT 1").fetchone()
+            return int(row["user_id"]) if row else None
+
     def add_account(self, phone: str, session: str, old_password: str | None = None) -> int:
         with self._db() as db:
             db.execute(

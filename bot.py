@@ -15,10 +15,13 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
+from telethon import functions, types
 from telethon.errors import SessionPasswordNeededError
 
 from storage import Store
 from telegram_ops import (
+    _copy_channel_posts,
+    copy_full_stories,
     client_from_session,
     clone_profile_and_channel,
     set_password_and_email,
@@ -481,6 +484,64 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
                 await source_client.disconnect()
 
 
+async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, project_id: int) -> None:
+    """One-time continuation for an interrupted setup without creating another channel."""
+    row = store.account(account_id)
+    project = store.project(project_id)
+    if not row or not project or not row["channel_id"]:
+        return
+    client = client_from_session(row["session"], API_ID, API_HASH)
+
+    async def progress(text: str) -> None:
+        await progress_message(chat_id, f"Аккаунт №{account_id}: {text}")
+
+    try:
+        store.update_account(account_id, status="оформляется", error=None)
+        await client.connect()
+        source_profile = await client.get_entity(project["source_username"])
+        source_full = await client(functions.users.GetFullUserRequest(source_profile))
+        source_channel_id = getattr(source_full.full_user, "personal_channel_id", None)
+        source_channel = next((item for item in source_full.chats if getattr(item, "id", None) == source_channel_id), None)
+        if not source_channel:
+            raise RuntimeError("Не найден личный канал источника")
+        channel = await client.get_entity(row["channel_id"])
+        await progress("Очищаю и заново копирую посты с форматированием")
+        old_posts = [message.id async for message in client.iter_messages(channel) if not message.action]
+        if old_posts:
+            await client(functions.channels.DeleteMessagesRequest(channel=channel, id=old_posts))
+        await _copy_channel_posts(client, client, source_channel, channel, progress)
+
+        await progress("Докопирую истории с паузами")
+        own_stories = await client(functions.stories.GetPeerStoriesRequest(peer=types.InputPeerSelf()))
+        old_story_ids = [story.id for story in getattr(own_stories, "stories", [])]
+        if old_story_ids:
+            with contextlib.suppress(Exception):
+                await client(functions.stories.DeleteStoriesRequest(peer=types.InputPeerSelf(), id=old_story_ids))
+        await copy_full_stories(client, client, source_profile, progress, STORY_INTERVAL)
+
+        await progress(f"Войдите в почту {row['email']} и пришлите код сюда.\nПароль почты: {row['email_password']}")
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        email_code_waiters[admin_id] = future
+        state[admin_id] = ("email_code", account_id)
+
+        async def code_provider(_code_length: int = 0) -> str:
+            return await asyncio.wait_for(future, timeout=15 * 60)
+
+        await set_password_and_email(client, row["old_password"], store.get_setting("new_password"), row["email"], code_provider)
+        store.update_account(account_id, status="готов", error=None)
+        await publish_result(chat_id, store.account(account_id), project["name"])
+    except Exception as exc:
+        log.exception("Resume failed for account %s", account_id)
+        store.update_account(account_id, status="ошибка", error=str(exc)[:900])
+        await progress(f"Ошибка: {exc}")
+    finally:
+        email_code_waiters.pop(admin_id, None)
+        if state.get(admin_id) == ("email_code", account_id):
+            state.pop(admin_id, None)
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+
+
 async def publish_result(chat_id: int, row, project_name: str) -> None:
     template = store.get_setting("access_template") or DEFAULT_ACCESS_TEMPLATE
     try:
@@ -640,6 +701,13 @@ async def status(callback: CallbackQuery) -> None:
 
 
 async def main() -> None:
+    manual_resume = store.get_setting("manual_resume")
+    if manual_resume:
+        store.set_setting("manual_resume", "")
+        account_id, project_id = (int(value) for value in manual_resume.split(":", 1))
+        admin_id = store.first_admin_id()
+        if admin_id:
+            jobs[account_id] = asyncio.create_task(resume_existing_account(admin_id, admin_id, account_id, project_id))
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
