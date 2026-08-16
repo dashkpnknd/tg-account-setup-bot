@@ -201,6 +201,40 @@ async def copy_full_stories(
     return copied
 
 
+async def copy_stories_in_background(
+    target_session: str,
+    source_session: str | None,
+    source_profile_ref: str | None,
+    api_id: int,
+    api_hash: str,
+    progress: Progress,
+    interval_minutes: int,
+    clear_existing: bool = False,
+) -> int:
+    """Copy stories independently, so 2FA setup is never held up by long queues."""
+    target = client_from_session(target_session, api_id, api_hash)
+    source = client_from_session(source_session or target_session, api_id, api_hash)
+    try:
+        await target.connect()
+        if source is not target:
+            await source.connect()
+        source_profile = await source.get_entity(source_profile_ref) if source_profile_ref else await source.get_me()
+        if clear_existing:
+            own = await target(functions.stories.GetPeerStoriesRequest(peer=types.InputPeerSelf()))
+            block = getattr(own, "stories", None)
+            ids = [story.id for story in getattr(block, "stories", [])]
+            if ids:
+                with contextlib.suppress(Exception):
+                    await target(functions.stories.DeleteStoriesRequest(peer=types.InputPeerSelf(), id=ids))
+        return await copy_full_stories(source, target, source_profile, progress, interval_minutes)
+    finally:
+        with contextlib.suppress(Exception):
+            await target.disconnect()
+        if source is not target:
+            with contextlib.suppress(Exception):
+                await source.disconnect()
+
+
 async def clone_profile_and_channel(
     client: TelegramClient,
     source_client: TelegramClient,
@@ -305,15 +339,13 @@ async def clone_profile_and_channel(
         with contextlib.suppress(Exception):
             await client(functions.account.UpdatePersonalChannelRequest(channel=channel))
 
-        await progress("Запускаю полное копирование историй")
-        stories = await copy_full_stories(source_client, client, source_profile, progress, story_interval_minutes)
         return {
             "username": account_username,
             "name_emoji": name_emoji,
             "channel_username": channel_username,
             "channel_id": channel.id,
             "posts": post_count,
-            "stories": stories,
+            "stories": 0,
         }
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

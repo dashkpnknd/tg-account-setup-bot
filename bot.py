@@ -21,7 +21,7 @@ from telethon.errors import SessionPasswordNeededError
 from storage import Store
 from telegram_ops import (
     _copy_channel_posts,
-    copy_full_stories,
+    copy_stories_in_background,
     client_from_session,
     clone_profile_and_channel,
     set_password_and_email,
@@ -53,6 +53,7 @@ state: dict[int, tuple[str, int | None]] = {}
 qr_flows: dict[int, dict] = {}
 email_code_waiters: dict[int, asyncio.Future[str]] = {}
 jobs: dict[int, asyncio.Task] = {}
+story_jobs: set[asyncio.Task] = set()
 
 
 def kb(*rows: tuple[str, str]) -> InlineKeyboardMarkup:
@@ -107,6 +108,20 @@ async def safe_edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMa
 
 async def progress_message(chat_id: int, text: str) -> None:
     await bot.send_message(chat_id, text)
+
+
+def schedule_story_copy(chat_id: int, account_id: int, target_session: str, project, clear_existing: bool = False) -> None:
+    async def progress(text: str) -> None:
+        await progress_message(chat_id, f"Аккаунт №{account_id}: {text}")
+
+    task = asyncio.create_task(
+        copy_stories_in_background(
+            target_session, project["session"] if project["source_account_id"] else None,
+            project["source_username"], API_ID, API_HASH, progress, STORY_INTERVAL, clear_existing,
+        )
+    )
+    story_jobs.add(task)
+    task.add_done_callback(story_jobs.discard)
 
 
 @dp.message(CommandStart())
@@ -451,6 +466,8 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
             progress,
         )
         store.update_account(account_id, **result)
+        schedule_story_copy(chat_id, account_id, row["session"], project)
+        await progress("Истории копируются в фоне — продолжаю привязку почты")
         await progress(f"Войдите в почту {row['email']} и пришлите код сюда.\nПароль почты: {row['email_password']}")
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         email_code_waiters[admin_id] = future
@@ -511,14 +528,8 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
             await client(functions.channels.DeleteMessagesRequest(channel=channel, id=old_posts))
         await _copy_channel_posts(client, client, source_channel, channel, progress)
 
-        await progress("Докопирую истории с паузами")
-        own_stories = await client(functions.stories.GetPeerStoriesRequest(peer=types.InputPeerSelf()))
-        own_story_block = getattr(own_stories, "stories", None)
-        old_story_ids = [story.id for story in getattr(own_story_block, "stories", [])]
-        if old_story_ids:
-            with contextlib.suppress(Exception):
-                await client(functions.stories.DeleteStoriesRequest(peer=types.InputPeerSelf(), id=old_story_ids))
-        await copy_full_stories(client, client, source_profile, progress, STORY_INTERVAL)
+        schedule_story_copy(chat_id, account_id, row["session"], project, clear_existing=True)
+        await progress("Истории копируются в фоне — продолжаю привязку почты")
 
         await progress(f"Войдите в почту {row['email']} и пришлите код сюда.\nПароль почты: {row['email_password']}")
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
