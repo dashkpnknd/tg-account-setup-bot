@@ -488,7 +488,7 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
     """One-time continuation for an interrupted setup without creating another channel."""
     row = store.account(account_id)
     project = store.project(project_id)
-    if not row or not project or not row["channel_id"]:
+    if not row or not project or not row["channel_username"]:
         return
     client = client_from_session(row["session"], API_ID, API_HASH)
 
@@ -504,7 +504,7 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
         source_channel = next((item for item in source_full.chats if getattr(item, "id", None) == source_channel_id), None)
         if not source_channel:
             raise RuntimeError("Не найден личный канал источника")
-        channel = await client.get_entity(row["channel_id"])
+        channel = await client.get_entity(f"@{row['channel_username']}")
         await progress("Очищаю и заново копирую посты с форматированием")
         old_posts = [message.id async for message in client.iter_messages(channel) if not message.action]
         if old_posts:
