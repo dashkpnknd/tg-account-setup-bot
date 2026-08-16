@@ -62,6 +62,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE COLLATE NOCASE,
                     source_account_id INTEGER NOT NULL UNIQUE,
+                    username_base TEXT NOT NULL DEFAULT 'tgprofile',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(source_account_id) REFERENCES accounts(id)
                 );
@@ -70,6 +71,9 @@ class Store:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(accounts)")}
             if "name_emoji" not in columns:
                 db.execute("ALTER TABLE accounts ADD COLUMN name_emoji TEXT")
+            project_columns = {row["name"] for row in db.execute("PRAGMA table_info(projects)")}
+            if "username_base" not in project_columns:
+                db.execute("ALTER TABLE projects ADD COLUMN username_base TEXT NOT NULL DEFAULT 'tgprofile'")
 
     def get_setting(self, key: str, default: str = "") -> str:
         with self._db() as db:
@@ -132,11 +136,11 @@ class Store:
                 (project_id,),
             ).fetchone()
 
-    def add_project(self, name: str, source_account_id: int) -> int:
+    def add_project(self, name: str, source_account_id: int, username_base: str) -> int:
         with self._db() as db:
             db.execute(
-                "INSERT INTO projects(name, source_account_id) VALUES (?, ?)",
-                (name.strip(), source_account_id),
+                "INSERT INTO projects(name, source_account_id, username_base) VALUES (?, ?, ?)",
+                (name.strip(), source_account_id, username_base.strip()),
             )
             return int(db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 

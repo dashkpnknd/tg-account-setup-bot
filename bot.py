@@ -6,6 +6,7 @@ import io
 import logging
 import os
 import random
+import re
 import tempfile
 from pathlib import Path
 
@@ -124,7 +125,6 @@ async def home(callback: CallbackQuery) -> None:
 async def settings(callback: CallbackQuery) -> None:
     if not await ensure_admin(callback):
         return
-    seed = store.get_setting("username_seed", "tgprofile")
     report = store.get_setting("report_channel", "не задан")
     password = "задан" if store.get_setting("new_password") else "не задан"
     access_template = "индивидуальный" if store.get_setting("access_template") else "стандартный"
@@ -133,12 +133,11 @@ async def settings(callback: CallbackQuery) -> None:
         "Общие настройки\n\n"
         "Источник выбирается через проект: у проекта один привязанный аккаунт, "
         "а его личный канал определяется автоматически.\n\n"
-        f"Основа username: {seed}\nКанал «Telegram доступ»: {report}\n"
+        f"Канал «Telegram доступ»: {report}\n"
         f"Формат доступов: {access_template}\nНовый пароль: {password}\n\n"
-        f"Username: на основе «{seed}» с разными случайными буквами, словами и 3–5 цифрами.\n"
+        "Основа username задаётся для каждого проекта отдельно; к ней добавляются случайные буквы, слова и 3–5 цифр.\n"
         "К имени каждого нового аккаунта добавляется уникальный деловой эмодзи.",
         kb(
-            ("🔤 Основа username", "set_username_seed"),
             ("📬 Канал с доступами", "set_report_channel"),
             ("📄 Формат доступов", "set_access_template"),
             ("🔐 Новый пароль", "set_new_password"),
@@ -148,7 +147,6 @@ async def settings(callback: CallbackQuery) -> None:
 
 
 SETTING_ACTIONS = {
-    "set_username_seed": ("username_seed", "Пришлите основу для username, например appiphone."),
     "set_report_channel": ("report_channel", "Пришлите @username или ID закрытого канала «Telegram доступ», либо перешлите из него любое сообщение. Бот должен быть в нём администратором."),
     "set_access_template": (
         "access_template",
@@ -166,7 +164,7 @@ async def projects(callback: CallbackQuery) -> None:
     rows = store.projects()
     lines = ["Проекты-источники\n\nДля каждого проекта один раз привяжите аккаунт-источник. Его профиль и личный канал будут использоваться автоматически."]
     if rows:
-        lines += [f"• {row['name']} — аккаунт {row['phone']}" for row in rows]
+        lines += [f"• {row['name']} — аккаунт {row['phone']} — @{row['username_base']}…" for row in rows]
     else:
         lines.append("\nПроектов пока нет.")
     await safe_edit(callback, "\n".join(lines), kb(("➕ Привязать аккаунт к проекту", "project_add"), ("◀️ В меню", "home")))
@@ -348,7 +346,7 @@ async def request_old_password(callback: CallbackQuery) -> None:
 
 
 def setup_ready() -> str | None:
-    required = ("username_seed", "report_channel", "new_password")
+    required = ("report_channel", "new_password")
     missing = [name for name in required if not store.get_setting(name)]
     return ", ".join(missing) if missing else None
 
@@ -430,7 +428,7 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
         result = await clone_profile_and_channel(
             client,
             source_client,
-            store.get_setting("username_seed"),
+            project["username_base"],
             name_emoji,
             STORY_INTERVAL,
             progress,
@@ -528,8 +526,19 @@ async def text_input(message: Message) -> None:
         state.pop(message.from_user.id, None)
         await show_home(message, "✅ Настройка сохранена.")
     elif kind == "project_name" and account_id:
+        state[message.from_user.id] = (f"project_username_base:{value}", account_id)
+        await message.answer(
+            "Теперь пришлите основу username именно для этого проекта — одно короткое слово латиницей, без @ и пробелов.\n"
+            "Например: mebel, appiphone или brandshop.",
+            reply_markup=back(),
+        )
+    elif kind.startswith("project_username_base:") and account_id:
+        project_name = kind.split(":", 1)[1]
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,18}", value):
+            await message.answer("Используйте 3–18 латинских букв, цифр или _. Например: mebel, appiphone, brand_shop.")
+            return
         try:
-            project_id = store.add_project(value, account_id)
+            project_id = store.add_project(project_name, account_id, value)
         except Exception as exc:
             await message.answer(f"Не удалось создать проект: {exc}")
             return
