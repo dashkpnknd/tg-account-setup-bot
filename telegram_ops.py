@@ -91,10 +91,10 @@ async def _copy_channel_posts(source_client: TelegramClient, target_client: Tele
                 if not media_path:
                     continue
                 try:
-                await target_client.send_file(
-                    target, media_path, caption=message.message or "",
-                    formatting_entities=message.entities or [],
-                )
+                    await target_client.send_file(
+                        target, media_path, caption=message.message or "",
+                        formatting_entities=message.entities or [],
+                    )
                 finally:
                     with contextlib.suppress(OSError):
                         Path(media_path).unlink()
@@ -284,7 +284,7 @@ async def clone_profile_and_channel(
 
         channel_photo = await _photo_path(source_client, source_channel, temp_dir, "channel.jpg")
         if channel_photo:
-                await client(
+            await client(
                 functions.channels.EditPhotoRequest(
                     channel=channel,
                     photo=types.InputChatUploadedPhoto(file=await client.upload_file(channel_photo)),
