@@ -25,7 +25,9 @@ def client_from_session(session: str, api_id: int, api_hash: str) -> TelegramCli
 
 
 def username_base(value: str) -> str:
-    clean = re.sub(r"[^a-zA-Z0-9_]", "", value.lstrip("@")).lower()
+    # Telegram treats usernames case-insensitively but retains the entered
+    # casing in the profile UI, so preserve the project's visual spelling.
+    clean = re.sub(r"[^a-zA-Z0-9_]", "", value.lstrip("@"))
     return (clean or "tgprofile")[:18]
 
 
@@ -53,8 +55,8 @@ async def choose_usernames(client: TelegramClient, base: str) -> tuple[str, str]
     for _ in range(60):
         clean_base = username_base(base)
         suffix = "".join(random.choices("23456789", k=4))
-        account_name = f"{clean_base[:27]}_{suffix}"[:32]
-        channel_name = f"{clean_base[:23]}_ch_{suffix}"[:32]
+        account_name = f"{clean_base[:28]}{suffix}"[:32]
+        channel_name = f"{clean_base[:26]}Ch{suffix}"[:32]
         try:
             account_free = await client(functions.account.CheckUsernameRequest(account_name))
             if not account_free:
