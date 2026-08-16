@@ -61,10 +61,12 @@ class Store:
                 CREATE TABLE IF NOT EXISTS projects (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                    source_account_id INTEGER NOT NULL UNIQUE,
+                    source_account_id INTEGER UNIQUE,
+                    source_username TEXT UNIQUE,
                     username_base TEXT NOT NULL DEFAULT 'tgprofile',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(source_account_id) REFERENCES accounts(id)
+                    FOREIGN KEY(source_account_id) REFERENCES accounts(id),
+                    CHECK(source_account_id IS NOT NULL OR source_username IS NOT NULL)
                 );
                 """
             )
@@ -72,7 +74,26 @@ class Store:
             if "name_emoji" not in columns:
                 db.execute("ALTER TABLE accounts ADD COLUMN name_emoji TEXT")
             project_columns = {row["name"] for row in db.execute("PRAGMA table_info(projects)")}
-            if "username_base" not in project_columns:
+            if "source_username" not in project_columns:
+                db.executescript(
+                    """
+                    CREATE TABLE projects_migrated (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                        source_account_id INTEGER UNIQUE,
+                        source_username TEXT UNIQUE,
+                        username_base TEXT NOT NULL DEFAULT 'tgprofile',
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(source_account_id) REFERENCES accounts(id),
+                        CHECK(source_account_id IS NOT NULL OR source_username IS NOT NULL)
+                    );
+                    INSERT INTO projects_migrated(id, name, source_account_id, username_base, created_at)
+                    SELECT id, name, source_account_id, username_base, created_at FROM projects;
+                    DROP TABLE projects;
+                    ALTER TABLE projects_migrated RENAME TO projects;
+                    """
+                )
+            elif "username_base" not in project_columns:
                 db.execute("ALTER TABLE projects ADD COLUMN username_base TEXT NOT NULL DEFAULT 'tgprofile'")
 
     def get_setting(self, key: str, default: str = "") -> str:
@@ -124,7 +145,7 @@ class Store:
             return list(
                 db.execute(
                     "SELECT p.*, a.phone, a.username FROM projects p "
-                    "JOIN accounts a ON a.id = p.source_account_id ORDER BY p.name"
+                    "LEFT JOIN accounts a ON a.id = p.source_account_id ORDER BY p.name"
                 )
             )
 
@@ -132,11 +153,11 @@ class Store:
         with self._db() as db:
             return db.execute(
                 "SELECT p.*, a.phone, a.username, a.session FROM projects p "
-                "JOIN accounts a ON a.id = p.source_account_id WHERE p.id = ?",
+                "LEFT JOIN accounts a ON a.id = p.source_account_id WHERE p.id = ?",
                 (project_id,),
             ).fetchone()
 
-    def add_project(self, name: str, source_account_id: int, username_base: str) -> int:
+    def add_account_project(self, name: str, source_account_id: int, username_base: str) -> int:
         with self._db() as db:
             db.execute(
                 "INSERT INTO projects(name, source_account_id, username_base) VALUES (?, ?, ?)",
@@ -144,9 +165,20 @@ class Store:
             )
             return int(db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 
+    def add_public_project(self, name: str, source_username: str, username_base: str) -> int:
+        with self._db() as db:
+            db.execute(
+                "INSERT INTO projects(name, source_username, username_base) VALUES (?, ?, ?)",
+                (name.strip(), source_username.lstrip("@").strip(), username_base.strip()),
+            )
+            return int(db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+
     def source_account_ids(self) -> set[int]:
         with self._db() as db:
-            return {int(row["source_account_id"]) for row in db.execute("SELECT source_account_id FROM projects")}
+            return {
+                int(row["source_account_id"])
+                for row in db.execute("SELECT source_account_id FROM projects WHERE source_account_id IS NOT NULL")
+            }
 
     def used_name_emojis(self) -> set[str]:
         with self._db() as db:

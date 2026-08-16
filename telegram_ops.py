@@ -190,13 +190,14 @@ async def copy_full_stories(
 async def clone_profile_and_channel(
     client: TelegramClient,
     source_client: TelegramClient,
+    source_profile_ref: str | None,
     username_seed: str,
     name_emoji: str,
     story_interval_minutes: int,
     progress: Progress,
 ) -> dict[str, object]:
     """Copies the source profile, creates an equivalent channel, copies posts and full stories."""
-    source_profile = await source_client.get_me()
+    source_profile = await source_client.get_entity(source_profile_ref) if source_profile_ref else await source_client.get_me()
     source_full_result = await source_client(functions.users.GetFullUserRequest(source_profile))
     source_full = source_full_result.full_user
     source_channel_id = getattr(source_full, "personal_channel_id", None)

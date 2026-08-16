@@ -164,14 +164,18 @@ async def projects(callback: CallbackQuery) -> None:
     rows = store.projects()
     lines = ["Проекты-источники\n\nДля каждого проекта один раз привяжите аккаунт-источник. Его профиль и личный канал будут использоваться автоматически."]
     if rows:
-        lines += [f"• {row['name']} — аккаунт {row['phone']} — @{row['username_base']}…" for row in rows]
+        lines += [
+            f"• {row['name']} — {'@' + row['source_username'] if row['source_username'] else 'аккаунт ' + row['phone']} "
+            f"— @{row['username_base']}…"
+            for row in rows
+        ]
     else:
         lines.append("\nПроектов пока нет.")
-    await safe_edit(callback, "\n".join(lines), kb(("➕ Привязать аккаунт к проекту", "project_add"), ("◀️ В меню", "home")))
+    await safe_edit(callback, "\n".join(lines), kb(("➕ Открытый источник по @username", "project_public"), ("🔐 Источник через QR-аккаунт", "project_account_add"), ("◀️ В меню", "home")))
 
 
-@dp.callback_query(F.data == "project_add")
-async def project_add(callback: CallbackQuery) -> None:
+@dp.callback_query(F.data == "project_account_add")
+async def project_account_add(callback: CallbackQuery) -> None:
     if not await ensure_admin(callback):
         return
     used = store.source_account_ids()
@@ -182,6 +186,14 @@ async def project_add(callback: CallbackQuery) -> None:
     buttons = [[InlineKeyboardButton(text=row['phone'], callback_data=f"project_source:{row['id']}")] for row in rows[:40]]
     buttons.append([InlineKeyboardButton(text="◀️ К проектам", callback_data="projects")])
     await safe_edit(callback, "Выберите аккаунт-источник для нового проекта:", InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@dp.callback_query(F.data == "project_public")
+async def project_public(callback: CallbackQuery) -> None:
+    if not await ensure_admin(callback):
+        return
+    state[callback.from_user.id] = ("project_public_username", None)
+    await safe_edit(callback, "Пришлите открытый @username профиля-источника. Его личный канал тоже должен быть доступен публично.", back())
 
 
 @dp.callback_query(F.data.startswith("project_source:"))
@@ -409,7 +421,7 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
     project = store.project(project_id)
     if not project:
         return
-    source_client = client_from_session(project["session"], API_ID, API_HASH)
+    source_client = client_from_session(project["session"], API_ID, API_HASH) if project["source_account_id"] else client
     name_emoji = row["name_emoji"] or next(
         (emoji for emoji in random.sample(BUSINESS_EMOJIS, len(BUSINESS_EMOJIS)) if emoji not in store.used_name_emojis()),
         random.choice(BUSINESS_EMOJIS),
@@ -421,13 +433,15 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
 
     try:
         await client.connect()
-        await source_client.connect()
+        if source_client is not client:
+            await source_client.connect()
         me = await client.get_me()
         if not getattr(me, "premium", False):
             raise RuntimeError("на аккаунте не найден Telegram Premium")
         result = await clone_profile_and_channel(
             client,
             source_client,
+            project["source_username"],
             project["username_base"],
             name_emoji,
             STORY_INTERVAL,
@@ -462,8 +476,9 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
             state.pop(admin_id, None)
         with contextlib.suppress(Exception):
             await client.disconnect()
-        with contextlib.suppress(Exception):
-            await source_client.disconnect()
+        if source_client is not client:
+            with contextlib.suppress(Exception):
+                await source_client.disconnect()
 
 
 async def publish_result(chat_id: int, row, project_name: str) -> None:
@@ -538,12 +553,35 @@ async def text_input(message: Message) -> None:
             await message.answer("Используйте 3–18 латинских букв, цифр или _. Например: mebel, appiphone, brand_shop.")
             return
         try:
-            project_id = store.add_project(project_name, account_id, value)
+            project_id = store.add_account_project(project_name, account_id, value)
         except Exception as exc:
             await message.answer(f"Не удалось создать проект: {exc}")
             return
         state.pop(message.from_user.id, None)
         await message.answer(f"✅ Проект №{project_id} создан. Источник будет браться из этого аккаунта автоматически.", reply_markup=home_kb())
+    elif kind == "project_public_username":
+        username = value.lstrip("@")
+        if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+            await message.answer("Пришлите корректный публичный username, например @brandshop.")
+            return
+        state[message.from_user.id] = (f"project_public_name:{username}", None)
+        await message.answer("Пришлите название проекта.", reply_markup=back())
+    elif kind.startswith("project_public_name:"):
+        source_username = kind.split(":", 1)[1]
+        state[message.from_user.id] = (f"project_public_base:{source_username}:{value}", None)
+        await message.answer("Пришлите основу username для нового аккаунта: 3–18 латинских букв, цифр или _. Например: brandshop.", reply_markup=back())
+    elif kind.startswith("project_public_base:"):
+        _, source_username, project_name = kind.split(":", 2)
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,18}", value):
+            await message.answer("Используйте 3–18 латинских букв, цифр или _. Например: mebel, appiphone, brand_shop.")
+            return
+        try:
+            project_id = store.add_public_project(project_name, source_username, value)
+        except Exception as exc:
+            await message.answer(f"Не удалось создать проект: {exc}")
+            return
+        state.pop(message.from_user.id, None)
+        await message.answer(f"✅ Проект №{project_id} создан. Источник @{source_username} будет использоваться без входа в него.", reply_markup=home_kb())
     elif kind == "mail_import":
         await import_mailboxes(message, value)
     elif kind == "qr_password":
