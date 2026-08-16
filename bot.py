@@ -513,7 +513,8 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
 
         await progress("Докопирую истории с паузами")
         own_stories = await client(functions.stories.GetPeerStoriesRequest(peer=types.InputPeerSelf()))
-        old_story_ids = [story.id for story in getattr(own_stories, "stories", [])]
+        own_story_block = getattr(own_stories, "stories", None)
+        old_story_ids = [story.id for story in getattr(own_story_block, "stories", [])]
         if old_story_ids:
             with contextlib.suppress(Exception):
                 await client(functions.stories.DeleteStoriesRequest(peer=types.InputPeerSelf(), id=old_story_ids))
