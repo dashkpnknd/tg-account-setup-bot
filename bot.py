@@ -135,7 +135,7 @@ async def settings(callback: CallbackQuery) -> None:
         "а его личный канал определяется автоматически.\n\n"
         f"Основа username: {seed}\nКанал «Telegram доступ»: {report}\n"
         f"Формат доступов: {access_template}\nНовый пароль: {password}\n\n"
-        f"Username: {seed} + 2 случайные цифры; канал: {seed}_ch + те же цифры.\n"
+        f"Username: на основе «{seed}» с разными случайными буквами, словами и 3–5 цифрами.\n"
         "К имени каждого нового аккаунта добавляется уникальный деловой эмодзи.",
         kb(
             ("🔤 Основа username", "set_username_seed"),

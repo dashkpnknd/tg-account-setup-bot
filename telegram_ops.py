@@ -29,13 +29,30 @@ def username_base(value: str) -> str:
     return (clean or "tgprofile")[:18]
 
 
-async def choose_usernames(client: TelegramClient, base: str) -> tuple[str, str]:
-    """Reserve matched, readable names only after both candidates are available."""
+def random_username(base: str, channel: bool = False) -> str:
+    """Build a readable but varied username from the selected project base."""
     base = username_base(base)
+    word = random.choice(("pro", "team", "hub", "media", "work", "studio", "group", "online", "office", "club"))
+    letters = "".join(random.choices("abcdefghijklmnopqrstuvwxyz", k=random.randint(2, 4)))
+    digits = "".join(random.choices("23456789", k=random.randint(3, 5)))
+    stem = base[:14]
+    variants = (
+        f"{stem}{word}{letters}{digits}",
+        f"{stem}{letters}{word}{digits}",
+        f"{stem}_{word}{letters}{digits}",
+        f"{stem}{letters}_{word}{digits}",
+    )
+    candidate = random.choice(variants)
+    if channel:
+        candidate = f"{candidate[:29]}ch"
+    return candidate[:32]
+
+
+async def choose_usernames(client: TelegramClient, base: str) -> tuple[str, str]:
+    """Reserve distinct, readable usernames after Telegram checks availability."""
     for _ in range(60):
-        suffix = "".join(random.choices("23456789", k=2))
-        account_name = f"{base}{suffix}"[:32]
-        channel_name = f"{base}_ch{suffix}"[:32]
+        account_name = random_username(base)
+        channel_name = random_username(base, channel=True)
         try:
             account_free = await client(functions.account.CheckUsernameRequest(account_name))
             if not account_free:
