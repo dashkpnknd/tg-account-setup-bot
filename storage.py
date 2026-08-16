@@ -57,6 +57,13 @@ class Store:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    source_account_id INTEGER NOT NULL UNIQUE,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(source_account_id) REFERENCES accounts(id)
+                );
                 """
             )
 
@@ -103,6 +110,35 @@ class Store:
     def account(self, account_id: int) -> sqlite3.Row | None:
         with self._db() as db:
             return db.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+
+    def projects(self) -> list[sqlite3.Row]:
+        with self._db() as db:
+            return list(
+                db.execute(
+                    "SELECT p.*, a.phone, a.username FROM projects p "
+                    "JOIN accounts a ON a.id = p.source_account_id ORDER BY p.name"
+                )
+            )
+
+    def project(self, project_id: int) -> sqlite3.Row | None:
+        with self._db() as db:
+            return db.execute(
+                "SELECT p.*, a.phone, a.username, a.session FROM projects p "
+                "JOIN accounts a ON a.id = p.source_account_id WHERE p.id = ?",
+                (project_id,),
+            ).fetchone()
+
+    def add_project(self, name: str, source_account_id: int) -> int:
+        with self._db() as db:
+            db.execute(
+                "INSERT INTO projects(name, source_account_id) VALUES (?, ?)",
+                (name.strip(), source_account_id),
+            )
+            return int(db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+
+    def source_account_ids(self) -> set[int]:
+        with self._db() as db:
+            return {int(row["source_account_id"]) for row in db.execute("SELECT source_account_id FROM projects")}
 
     def update_account(self, account_id: int, **fields: object) -> None:
         allowed = {

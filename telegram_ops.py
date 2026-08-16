@@ -55,17 +55,24 @@ async def _photo_path(client: TelegramClient, entity: object, directory: Path, n
         return None
 
 
-async def _copy_channel_posts(client: TelegramClient, source: object, target: object, progress: Progress) -> int:
+async def _copy_channel_posts(source_client: TelegramClient, target_client: TelegramClient, source: object, target: object, progress: Progress) -> int:
     """Copies message text and media. Statistics and original forwarding metadata are not copied."""
     copied = 0
-    async for message in client.iter_messages(source, reverse=True):
+    async for message in source_client.iter_messages(source, reverse=True):
         if message.action:
             continue
         try:
             if message.media:
-                await client.send_file(target, message.media, caption=message.message or "")
+                media_path = await source_client.download_media(message.media)
+                if not media_path:
+                    continue
+                try:
+                    await target_client.send_file(target, media_path, caption=message.message or "")
+                finally:
+                    with contextlib.suppress(OSError):
+                        Path(media_path).unlink()
             elif message.message:
-                await client.send_message(target, message.message)
+                await target_client.send_message(target, message.message)
             else:
                 continue
             copied += 1
@@ -79,15 +86,15 @@ async def _copy_channel_posts(client: TelegramClient, source: object, target: ob
     return copied
 
 
-async def _story_media(client: TelegramClient, story: object, directory: Path) -> object | None:
+async def _story_media(source_client: TelegramClient, target_client: TelegramClient, story: object, directory: Path) -> object | None:
     media = getattr(story, "media", None)
     if not media:
         return None
     try:
-        local_path = await client.download_media(media, file=directory)
+        local_path = await source_client.download_media(media, file=directory)
         if not local_path:
             return None
-        uploaded = await client.upload_file(local_path)
+        uploaded = await target_client.upload_file(local_path)
         if isinstance(media, types.MessageMediaPhoto):
             return types.InputMediaUploadedPhoto(file=uploaded)
         document = getattr(media, "document", None)
@@ -117,13 +124,14 @@ async def _source_stories(client: TelegramClient, peer: object) -> list[object]:
 
 
 async def copy_full_stories(
-    client: TelegramClient,
+    source_client: TelegramClient,
+    target_client: TelegramClient,
     source: object,
     progress: Progress,
     interval_minutes: int,
 ) -> int:
     """Port of the FULL_CRM full-story approach: all pinned stories, pinned on target, in order."""
-    stories = await _source_stories(client, source)
+    stories = await _source_stories(source_client, source)
     if not stories:
         await progress("У источника нет доступных историй для полного копирования")
         return 0
@@ -131,11 +139,11 @@ async def copy_full_stories(
     copied = 0
     try:
         for index, story in enumerate(stories, start=1):
-            media = await _story_media(client, story, directory)
+            media = await _story_media(source_client, target_client, story, directory)
             if not media:
                 continue
             try:
-                await client(
+                await target_client(
                     functions.stories.SendStoryRequest(
                         peer=types.InputPeerSelf(),
                         media=media,
@@ -164,16 +172,24 @@ async def copy_full_stories(
 
 async def clone_profile_and_channel(
     client: TelegramClient,
-    source_profile_ref: str,
-    source_channel_ref: str,
+    source_client: TelegramClient,
     username_seed: str,
     story_interval_minutes: int,
     progress: Progress,
 ) -> dict[str, object]:
     """Copies the source profile, creates an equivalent channel, copies posts and full stories."""
-    source_profile = await client.get_entity(source_profile_ref)
-    source_channel = await client.get_entity(source_channel_ref)
-    source_full = await client(functions.users.GetFullUserRequest(source_profile))
+    source_profile = await source_client.get_me()
+    source_full_result = await source_client(functions.users.GetFullUserRequest(source_profile))
+    source_full = source_full_result.full_user
+    source_channel_id = getattr(source_full, "personal_channel_id", None)
+    if not source_channel_id:
+        raise RuntimeError("У аккаунта-источника не указан личный канал")
+    source_channel = next(
+        (chat for chat in getattr(source_full_result, "chats", []) if getattr(chat, "id", None) == source_channel_id),
+        None,
+    )
+    if not source_channel:
+        source_channel = await source_client.get_entity(types.PeerChannel(source_channel_id))
     bio = getattr(getattr(source_full, "full_user", None), "about", "") or ""
     first_name = getattr(source_profile, "first_name", "") or "Telegram"
     last_name = getattr(source_profile, "last_name", "") or ""
@@ -197,13 +213,13 @@ async def clone_profile_and_channel(
 
     temp_dir = Path(tempfile.mkdtemp(prefix="tg_setup_"))
     try:
-        profile_photo = await _photo_path(client, source_profile, temp_dir, "profile.jpg")
+        profile_photo = await _photo_path(source_client, source_profile, temp_dir, "profile.jpg")
         if profile_photo:
             file = await client.upload_file(profile_photo)
             await client(functions.photos.UploadProfilePhotoRequest(file=file))
 
         channel_title = getattr(source_channel, "title", "") or first_name
-        source_channel_full = await client(functions.channels.GetFullChannelRequest(source_channel))
+        source_channel_full = await source_client(functions.channels.GetFullChannelRequest(source_channel))
         channel_about = getattr(getattr(source_channel_full, "full_chat", None), "about", "") or ""
         created = await client(
             functions.channels.CreateChannelRequest(title=channel_title, about=channel_about, megagroup=False)
@@ -222,7 +238,7 @@ async def clone_profile_and_channel(
         else:
             raise RuntimeError("Не удалось назначить username канала")
 
-        channel_photo = await _photo_path(client, source_channel, temp_dir, "channel.jpg")
+        channel_photo = await _photo_path(source_client, source_channel, temp_dir, "channel.jpg")
         if channel_photo:
             await client(
                 functions.channels.EditPhotoRequest(
@@ -232,12 +248,12 @@ async def clone_profile_and_channel(
             )
 
         await progress("Копирую посты канала")
-        post_count = await _copy_channel_posts(client, source_channel, channel, progress)
+        post_count = await _copy_channel_posts(source_client, client, source_channel, channel, progress)
         with contextlib.suppress(Exception):
             await client(functions.account.UpdatePersonalChannelRequest(channel=channel))
 
         await progress("Запускаю полное копирование историй")
-        stories = await copy_full_stories(client, source_profile, progress, story_interval_minutes)
+        stories = await copy_full_stories(source_client, client, source_profile, progress, story_interval_minutes)
         return {
             "username": account_username,
             "channel_username": channel_username,

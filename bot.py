@@ -54,6 +54,7 @@ def home_kb() -> InlineKeyboardMarkup:
     return kb(
         ("➕ Добавить аккаунт по QR", "add_qr"),
         ("📦 Оформить аккаунт", "accounts"),
+        ("📁 Проекты-источники", "projects"),
         ("⚙️ Источник и настройки", "settings"),
         ("📧 Загрузить почты", "mail_import"),
         ("📊 Статусы", "status"),
@@ -116,19 +117,16 @@ async def home(callback: CallbackQuery) -> None:
 async def settings(callback: CallbackQuery) -> None:
     if not await ensure_admin(callback):
         return
-    profile = store.get_setting("source_profile", "не задан")
-    channel = store.get_setting("source_channel", "не задан")
     seed = store.get_setting("username_seed", "tgprofile")
     report = store.get_setting("report_channel", "не задан")
     password = "задан" if store.get_setting("new_password") else "не задан"
     await safe_edit(
         callback,
-        "Настройки источника\n\n"
-        f"Профиль-источник: {profile}\nКанал-источник: {channel}\n"
+        "Общие настройки\n\n"
+        "Источник выбирается через проект: у проекта один привязанный аккаунт, "
+        "а его личный канал определяется автоматически.\n\n"
         f"Основа username: {seed}\nКанал «Telegram доступ»: {report}\nНовый пароль: {password}",
         kb(
-            ("👤 Профиль-источник", "set_source_profile"),
-            ("📢 Канал-источник", "set_source_channel"),
             ("🔤 Основа username", "set_username_seed"),
             ("📬 Канал с доступами", "set_report_channel"),
             ("🔐 Новый пароль", "set_new_password"),
@@ -138,12 +136,46 @@ async def settings(callback: CallbackQuery) -> None:
 
 
 SETTING_ACTIONS = {
-    "set_source_profile": ("source_profile", "Пришлите @username профиля-источника."),
-    "set_source_channel": ("source_channel", "Пришлите @username канала-источника."),
     "set_username_seed": ("username_seed", "Пришлите основу для username, например appiphone."),
     "set_report_channel": ("report_channel", "Пришлите @username или ID закрытого канала «Telegram доступ». Бот должен быть в нём администратором."),
     "set_new_password": ("new_password", "Пришлите новый пароль Telegram 2FA. Сообщение будет удалено после сохранения."),
 }
+
+
+@dp.callback_query(F.data == "projects")
+async def projects(callback: CallbackQuery) -> None:
+    if not await ensure_admin(callback):
+        return
+    rows = store.projects()
+    lines = ["Проекты-источники\n\nДля каждого проекта один раз привяжите аккаунт-источник. Его профиль и личный канал будут использоваться автоматически."]
+    if rows:
+        lines += [f"• {row['name']} — аккаунт {row['phone']}" for row in rows]
+    else:
+        lines.append("\nПроектов пока нет.")
+    await safe_edit(callback, "\n".join(lines), kb(("➕ Привязать аккаунт к проекту", "project_add"), ("◀️ В меню", "home")))
+
+
+@dp.callback_query(F.data == "project_add")
+async def project_add(callback: CallbackQuery) -> None:
+    if not await ensure_admin(callback):
+        return
+    used = store.source_account_ids()
+    rows = [row for row in store.accounts() if row['id'] not in used]
+    if not rows:
+        await safe_edit(callback, "Нет свободных аккаунтов. Сначала добавьте аккаунт-источник через QR.", back())
+        return
+    buttons = [[InlineKeyboardButton(text=row['phone'], callback_data=f"project_source:{row['id']}")] for row in rows[:40]]
+    buttons.append([InlineKeyboardButton(text="◀️ К проектам", callback_data="projects")])
+    await safe_edit(callback, "Выберите аккаунт-источник для нового проекта:", InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@dp.callback_query(F.data.startswith("project_source:"))
+async def project_source(callback: CallbackQuery) -> None:
+    if not await ensure_admin(callback):
+        return
+    account_id = int(callback.data.split(":", 1)[1])
+    state[callback.from_user.id] = ("project_name", account_id)
+    await safe_edit(callback, "Пришлите название проекта. Например: «Магазин А».", back())
 
 
 @dp.callback_query(F.data.in_(SETTING_ACTIONS))
@@ -257,7 +289,10 @@ async def accounts(callback: CallbackQuery) -> None:
         await safe_edit(callback, "Аккаунтов пока нет. Добавьте их через QR.", back())
         return
     buttons = []
+    source_ids = store.source_account_ids()
     for row in rows[:40]:
+        if row['id'] in source_ids:
+            continue
         label = f"{row['phone']} — {row['status']}"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"account:{row['id']}")])
     buttons.append([InlineKeyboardButton(text="◀️ В меню", callback_data="home")])
@@ -296,7 +331,7 @@ async def request_old_password(callback: CallbackQuery) -> None:
 
 
 def setup_ready() -> str | None:
-    required = ("source_profile", "source_channel", "username_seed", "report_channel", "new_password")
+    required = ("username_seed", "report_channel", "new_password")
     missing = [name for name in required if not store.get_setting(name)]
     return ", ".join(missing) if missing else None
 
@@ -313,8 +348,28 @@ async def run_account(callback: CallbackQuery) -> None:
     if account_id in jobs and not jobs[account_id].done():
         await callback.answer("Этот аккаунт уже оформляется.", show_alert=True)
         return
-    row = store.account(account_id)
-    if not row:
+    if not store.account(account_id):
+        return
+    projects = store.projects()
+    if not projects:
+        await callback.answer("Сначала создайте проект и привяжите аккаунт-источник.", show_alert=True)
+        return
+    buttons = [[InlineKeyboardButton(text=row['name'], callback_data=f"runproject:{account_id}:{row['id']}")] for row in projects]
+    buttons.append([InlineKeyboardButton(text="◀️ К аккаунтам", callback_data="accounts")])
+    await safe_edit(callback, "Выберите проект для оформления:", InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@dp.callback_query(F.data.startswith("runproject:"))
+async def run_project(callback: CallbackQuery) -> None:
+    if not await ensure_admin(callback):
+        return
+    _, account_id_raw, project_id_raw = callback.data.split(":")
+    account_id, project_id = int(account_id_raw), int(project_id_raw)
+    if account_id in jobs and not jobs[account_id].done():
+        await callback.answer("Этот аккаунт уже оформляется.", show_alert=True)
+        return
+    if not store.account(account_id) or not store.project(project_id):
+        await callback.answer("Аккаунт или проект не найден.", show_alert=True)
         return
     mailbox = store.reserve_mailbox(account_id)
     if not mailbox:
@@ -328,27 +383,31 @@ async def run_account(callback: CallbackQuery) -> None:
         email_password=mailbox["password"],
     )
     await safe_edit(callback, f"Аккаунт №{account_id} запущен. Отправлю статус по этапам.", back())
-    jobs[account_id] = asyncio.create_task(process_account(callback.message.chat.id, callback.from_user.id, account_id))
+    jobs[account_id] = asyncio.create_task(process_account(callback.message.chat.id, callback.from_user.id, account_id, project_id))
 
 
-async def process_account(chat_id: int, admin_id: int, account_id: int) -> None:
+async def process_account(chat_id: int, admin_id: int, account_id: int, project_id: int) -> None:
     row = store.account(account_id)
     if not row:
         return
     client = client_from_session(row["session"], API_ID, API_HASH)
+    project = store.project(project_id)
+    if not project:
+        return
+    source_client = client_from_session(project["session"], API_ID, API_HASH)
 
     async def progress(text: str) -> None:
         await progress_message(chat_id, f"Аккаунт №{account_id}: {text}")
 
     try:
         await client.connect()
+        await source_client.connect()
         me = await client.get_me()
         if not getattr(me, "premium", False):
             raise RuntimeError("на аккаунте не найден Telegram Premium")
         result = await clone_profile_and_channel(
             client,
-            store.get_setting("source_profile"),
-            store.get_setting("source_channel"),
+            source_client,
             store.get_setting("username_seed"),
             STORY_INTERVAL,
             progress,
@@ -382,6 +441,8 @@ async def process_account(chat_id: int, admin_id: int, account_id: int) -> None:
             state.pop(admin_id, None)
         with contextlib.suppress(Exception):
             await client.disconnect()
+        with contextlib.suppress(Exception):
+            await source_client.disconnect()
 
 
 async def publish_result(chat_id: int, row) -> None:
@@ -435,6 +496,14 @@ async def text_input(message: Message) -> None:
                 await message.delete()
         state.pop(message.from_user.id, None)
         await show_home(message, "✅ Настройка сохранена.")
+    elif kind == "project_name" and account_id:
+        try:
+            project_id = store.add_project(value, account_id)
+        except Exception as exc:
+            await message.answer(f"Не удалось создать проект: {exc}")
+            return
+        state.pop(message.from_user.id, None)
+        await message.answer(f"✅ Проект №{project_id} создан. Источник будет браться из этого аккаунта автоматически.", reply_markup=home_kb())
     elif kind == "mail_import":
         await import_mailboxes(message, value)
     elif kind == "qr_password":
