@@ -25,6 +25,7 @@ from telegram_ops import (
     client_from_session,
     clone_profile_and_channel,
     set_password_and_email,
+    set_password_only,
 )
 
 load_dotenv()
@@ -36,11 +37,6 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_IDS = {int(item) for item in os.environ.get("ADMIN_IDS", "").split(",") if item.strip().isdigit()}
 STORY_INTERVAL = max(0, int(os.environ.get("STORY_INTERVAL_MINUTES", "15")))
-DEFAULT_ACCESS_TEMPLATE = (
-    "{phone}\n@{username}\n\n"
-    "логин: {phone}\nпароль: {password}\n\n"
-    "почта для входа: {email}\nпароль: {email_password}"
-)
 BUSINESS_EMOJIS = ("💼", "📊", "📈", "📌", "📋", "🗂️", "🗓️", "📝", "🤝", "🏢", "💻", "📎", "🔖", "🧩", "🛠️")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
@@ -145,19 +141,17 @@ async def settings(callback: CallbackQuery) -> None:
         return
     report = store.get_setting("report_channel", "не задан")
     password = "задан" if store.get_setting("new_password") else "не задан"
-    access_template = "индивидуальный" if store.get_setting("access_template") else "стандартный"
     await safe_edit(
         callback,
         "Общие настройки\n\n"
         "Источник выбирается через проект: у проекта один привязанный аккаунт, "
         "а его личный канал определяется автоматически.\n\n"
         f"Канал «Telegram доступ»: {report}\n"
-        f"Формат доступов: {access_template}\nНовый пароль: {password}\n\n"
+        f"Формат доступов: автоматически из оформленного аккаунта\nНовый пароль: {password}\n\n"
         "Основа username задаётся для каждого проекта отдельно; к ней добавляются случайные буквы, слова и 3–5 цифр.\n"
         "К имени каждого нового аккаунта добавляется уникальный деловой эмодзи.",
         kb(
             ("📬 Канал с доступами", "set_report_channel"),
-            ("📄 Формат доступов", "set_access_template"),
             ("🔐 Новый пароль", "set_new_password"),
             ("◀️ В меню", "home"),
         ),
@@ -166,11 +160,6 @@ async def settings(callback: CallbackQuery) -> None:
 
 SETTING_ACTIONS = {
     "set_report_channel": ("report_channel", "Пришлите @username или ID закрытого канала «Telegram доступ», либо перешлите из него любое сообщение. Бот должен быть в нём администратором."),
-    "set_access_template": (
-        "access_template",
-        "Пришлите шаблон сообщения с полями: {phone}, {username}, {password}, {email}, {email_password}, {project}.\n\n"
-        "Пример:\nПроект: {project}\nЛогин: {phone}\nПароль: {password}\nПочта: {email}\nПароль почты: {email_password}",
-    ),
     "set_new_password": ("new_password", "Пришлите новый пароль Telegram 2FA. Сообщение будет удалено после сохранения."),
 }
 
@@ -468,21 +457,8 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
         store.update_account(account_id, **result)
         schedule_story_copy(chat_id, account_id, row["session"], project)
         await progress("Истории копируются в фоне — продолжаю привязку почты")
-        await progress(f"Войдите в почту {row['email']} и пришлите код сюда.\nПароль почты: {row['email_password']}")
-        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        email_code_waiters[admin_id] = future
-        state[admin_id] = ("email_code", account_id)
-
-        async def code_provider(_code_length: int = 0) -> str:
-            return await asyncio.wait_for(future, timeout=15 * 60)
-
-        await set_password_and_email(
-            client,
-            row["old_password"],
-            store.get_setting("new_password"),
-            row["email"],
-            code_provider,
-        )
+        await progress("Меняю 2FA-пароль. Почту владелец привяжет вручную.")
+        await set_password_only(client, row["old_password"], store.get_setting("new_password"))
         store.update_account(account_id, status="готов", error=None)
         final = store.account(account_id)
         await publish_result(chat_id, final, project["name"])
@@ -531,15 +507,8 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
         schedule_story_copy(chat_id, account_id, row["session"], project, clear_existing=True)
         await progress("Истории копируются в фоне — продолжаю привязку почты")
 
-        await progress(f"Войдите в почту {row['email']} и пришлите код сюда.\nПароль почты: {row['email_password']}")
-        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        email_code_waiters[admin_id] = future
-        state[admin_id] = ("email_code", account_id)
-
-        async def code_provider(_code_length: int = 0) -> str:
-            return await asyncio.wait_for(future, timeout=15 * 60)
-
-        await set_password_and_email(client, row["old_password"], store.get_setting("new_password"), row["email"], code_provider)
+        await progress("Меняю 2FA-пароль. Почту владелец привяжет вручную.")
+        await set_password_only(client, row["old_password"], store.get_setting("new_password"))
         store.update_account(account_id, status="готов", error=None)
         await publish_result(chat_id, store.account(account_id), project["name"])
     except Exception as exc:
@@ -554,23 +523,41 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
             await client.disconnect()
 
 
-async def publish_result(chat_id: int, row, project_name: str) -> None:
-    template = store.get_setting("access_template") or DEFAULT_ACCESS_TEMPLATE
+def display_phone(phone: str | None) -> str:
+    digits = "".join(char for char in (phone or "") if char.isdigit())
+    if len(digits) == 11 and digits.startswith("7"):
+        return f"+7 {digits[1:4]} {digits[4:7]} {digits[7:9]} {digits[9:11]}"
+    return f"+{digits}" if digits else "—"
+
+
+async def actual_account_identity(row) -> tuple[str, str]:
+    client = client_from_session(row["session"], API_ID, API_HASH)
     try:
-        card = template.format(
-            phone=row["phone"], username=row["username"] or "—",
-            password=store.get_setting("new_password"), email=row["email"] or "—",
-            email_password=row["email_password"] or "—", project=project_name,
-        )
-    except (KeyError, ValueError):
-        card = DEFAULT_ACCESS_TEMPLATE.format(
-            phone=row["phone"], username=row["username"] or "—",
-            password=store.get_setting("new_password"), email=row["email"] or "—",
-            email_password=row["email_password"] or "—", project=project_name,
-        )
+        await client.connect()
+        me = await client.get_me()
+        name = " ".join(part for part in (me.first_name, me.last_name) if part).strip() or "Аккаунт"
+        return name, me.username or row["username"] or "—"
+    finally:
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+
+
+async def publish_result(chat_id: int, row, project_name: str) -> None:
+    name, username = await actual_account_identity(row)
+    card = (
+        f"{name} ({project_name.lower()})\n@{username}\n\n"
+        f"логин: {display_phone(row['phone'])}\n"
+        f"пароль: {store.get_setting('new_password')}\n\n"
+        f"почта для входа: {row['email'] or '—'}\n"
+        f"пароль: {row['email_password'] or '—'}"
+    )
     await bot.send_message(chat_id, "✅ Аккаунт оформлен.\n\n" + card)
     report = store.get_setting("report_channel")
-    await bot.send_message(report, card)
+    try:
+        await bot.send_message(report, card)
+    except Exception:
+        log.exception("Could not publish access card to the configured channel")
+        await bot.send_message(chat_id, "⚠️ Карточка не отправлена в канал доступов: проверьте, что бот в нём администратор с правом публикации.")
 
 
 def parse_mailboxes(text: str) -> list[tuple[str, str]]:
@@ -713,6 +700,14 @@ async def status(callback: CallbackQuery) -> None:
 
 
 async def main() -> None:
+    manual_stories = store.get_setting("manual_stories")
+    if manual_stories:
+        store.set_setting("manual_stories", "")
+        account_id, project_id = (int(value) for value in manual_stories.split(":", 1))
+        row, project = store.account(account_id), store.project(project_id)
+        admin_id = store.first_admin_id()
+        if row and project and admin_id:
+            schedule_story_copy(admin_id, account_id, row["session"], project, clear_existing=False)
     manual_resume = store.get_setting("manual_resume")
     if manual_resume:
         store.set_setting("manual_resume", "")

@@ -366,3 +366,8 @@ async def set_password_and_email(
         email=email,
         email_code_callback=code_provider,
     )
+
+
+async def set_password_only(client: TelegramClient, old_password: str | None, new_password: str) -> None:
+    """Change 2FA without assigning a recovery email; the owner handles it manually."""
+    await client.edit_2fa(current_password=old_password or None, new_password=new_password, hint="")
