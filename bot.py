@@ -26,7 +26,6 @@ from telegram_ops import (
     clone_profile_and_channel,
     set_password_and_email,
     set_password_only,
-    wait_for_rambler_code,
 )
 
 load_dotenv()
@@ -458,9 +457,12 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
         store.update_account(account_id, **result)
         schedule_story_copy(chat_id, account_id, row["session"], project)
         await progress("Истории копируются в фоне — продолжаю привязку почты")
-        await progress("Меняю 2FA-пароль и автоматически привязываю почту")
+        await progress(f"Откройте почту {row['email']} и пришлите сюда код Telegram.\nПароль почты: {row['email_password']}")
         async def code_provider(_code_length: int = 0) -> str:
-            return await wait_for_rambler_code(row["email"], row["email_password"])
+            return await asyncio.wait_for(future, timeout=15 * 60)
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        email_code_waiters[admin_id] = future
+        state[admin_id] = ("email_code", account_id)
         await set_password_and_email(client, row["old_password"], store.get_setting("new_password"), row["email"], code_provider)
         store.update_account(account_id, old_password=store.get_setting("new_password"))
         store.update_account(account_id, status="готов", error=None)
@@ -511,9 +513,12 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
         schedule_story_copy(chat_id, account_id, row["session"], project, clear_existing=True)
         await progress("Истории копируются в фоне — продолжаю привязку почты")
 
-        await progress("Автоматически привязываю новую почту")
+        await progress(f"Откройте почту {row['email']} и пришлите сюда код Telegram.\nПароль почты: {row['email_password']}")
         async def code_provider(_code_length: int = 0) -> str:
-            return await wait_for_rambler_code(row["email"], row["email_password"])
+            return await asyncio.wait_for(future, timeout=15 * 60)
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        email_code_waiters[admin_id] = future
+        state[admin_id] = ("email_code", account_id)
         await set_password_and_email(client, store.get_setting("new_password"), store.get_setting("new_password"), row["email"], code_provider)
         store.update_account(account_id, old_password=store.get_setting("new_password"))
         store.update_account(account_id, status="готов", error=None)
@@ -522,6 +527,46 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
         log.exception("Resume failed for account %s", account_id)
         store.update_account(account_id, status="ошибка", error=str(exc)[:900])
         await progress(f"Ошибка: {exc}")
+    finally:
+        email_code_waiters.pop(admin_id, None)
+        if state.get(admin_id) == ("email_code", account_id):
+            state.pop(admin_id, None)
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+
+
+async def bind_existing_email(chat_id: int, admin_id: int, account_id: int, project_id: int) -> None:
+    """Bind the already assigned mailbox to an existing account and wait for a user-supplied code."""
+    row, project = store.account(account_id), store.project(project_id)
+    if not row or not project or not row["email"] or not row["email_password"]:
+        return
+    client = client_from_session(row["session"], API_ID, API_HASH)
+    try:
+        store.update_account(account_id, status="оформляется", error=None)
+        await client.connect()
+        with contextlib.suppress(Exception):
+            await client(functions.account.CancelPasswordEmailRequest())
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        email_code_waiters[admin_id] = future
+        state[admin_id] = ("email_code", account_id)
+        await progress_message(
+            chat_id,
+            f"Аккаунт №{account_id}: привязываю новую почту.\n\n"
+            f"Откройте: {row['email']}\nПароль: {row['email_password']}\n\n"
+            "Когда придёт письмо Telegram, пришлите код сюда одним сообщением.",
+        )
+
+        async def code_provider(_code_length: int = 0) -> str:
+            return await asyncio.wait_for(future, timeout=15 * 60)
+
+        password = store.get_setting("new_password")
+        await set_password_and_email(client, password, password, row["email"], code_provider)
+        store.update_account(account_id, old_password=password, status="готов", error=None)
+        await publish_result(chat_id, store.account(account_id), project["name"])
+    except Exception as exc:
+        log.exception("Email binding failed for account %s", account_id)
+        store.update_account(account_id, status="ошибка", error=str(exc)[:900])
+        await progress_message(chat_id, f"Аккаунт №{account_id}: ошибка привязки почты: {exc}")
     finally:
         email_code_waiters.pop(admin_id, None)
         if state.get(admin_id) == ("email_code", account_id):
@@ -707,6 +752,13 @@ async def status(callback: CallbackQuery) -> None:
 
 
 async def main() -> None:
+    manual_email_bind = store.get_setting("manual_email_bind")
+    if manual_email_bind:
+        store.set_setting("manual_email_bind", "")
+        account_id, project_id = (int(value) for value in manual_email_bind.split(":", 1))
+        admin_id = store.first_admin_id()
+        if admin_id:
+            jobs[account_id] = asyncio.create_task(bind_existing_email(admin_id, admin_id, account_id, project_id))
     manual_stories = store.get_setting("manual_stories")
     if manual_stories:
         store.set_setting("manual_stories", "")
