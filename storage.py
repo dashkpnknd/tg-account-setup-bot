@@ -236,6 +236,18 @@ class Store:
                 return None
             return db.execute("SELECT * FROM mailboxes WHERE id = ?", (row["id"],)).fetchone()
 
+    def assign_mailbox(self, account_id: int, address: str, password: str) -> sqlite3.Row:
+        """Assign a chosen mailbox to an account, returning any previous one to the pool."""
+        normalized = address.strip().lower()
+        with self._db() as db:
+            db.execute("UPDATE mailboxes SET account_id = NULL WHERE account_id = ?", (account_id,))
+            db.execute(
+                "INSERT INTO mailboxes(address, password, account_id) VALUES (?, ?, ?) "
+                "ON CONFLICT(address) DO UPDATE SET password=excluded.password, account_id=excluded.account_id, reserved_at=CURRENT_TIMESTAMP",
+                (normalized, password.strip(), account_id),
+            )
+            return db.execute("SELECT * FROM mailboxes WHERE address = ?", (normalized,)).fetchone()
+
     def mailbox_count(self) -> tuple[int, int]:
         with self._db() as db:
             total = db.execute("SELECT COUNT(*) AS n FROM mailboxes").fetchone()["n"]

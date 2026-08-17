@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import email
+import imaplib
 import random
 import re
 import shutil
@@ -18,6 +20,48 @@ from telethon.sessions import StringSession
 
 Progress = Callable[[str], Awaitable[None]]
 CodeProvider = Callable[[], Awaitable[str]]
+
+
+def _latest_rambler_code(address: str, password: str) -> str | None:
+    with imaplib.IMAP4_SSL("imap.rambler.ru", 993) as inbox:
+        inbox.login(address, password)
+        inbox.select("INBOX")
+        _, result = inbox.search(None, "ALL")
+        for message_id in reversed(result[0].split()[-30:]):
+            _, raw = inbox.fetch(message_id, "(RFC822)")
+            message = email.message_from_bytes(raw[0][1])
+            sender = (message.get("From") or "").lower()
+            if "telegram" not in sender:
+                continue
+            parts = []
+            if message.is_multipart():
+                for part in message.walk():
+                    if part.get_content_type() in {"text/plain", "text/html"}:
+                        payload = part.get_payload(decode=True) or b""
+                        parts.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
+            else:
+                payload = message.get_payload(decode=True) or b""
+                parts.append(payload.decode(message.get_content_charset() or "utf-8", errors="replace"))
+            match = re.search(r"(?<!\d)(\d{5,6})(?!\d)", "\n".join(parts))
+            if match:
+                return match.group(1)
+    return None
+
+
+async def wait_for_rambler_code(address: str, password: str, timeout_seconds: int = 600) -> str:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    last_error: Exception | None = None
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            code = await asyncio.to_thread(_latest_rambler_code, address, password)
+            if code:
+                return code
+        except Exception as exc:
+            last_error = exc
+        await asyncio.sleep(10)
+    if last_error:
+        raise RuntimeError(f"Не удалось получить код из Rambler: {last_error}")
+    raise RuntimeError("Код Telegram не пришёл на Rambler за 10 минут")
 
 
 def client_from_session(session: str, api_id: int, api_hash: str) -> TelegramClient:

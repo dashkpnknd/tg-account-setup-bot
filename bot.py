@@ -26,6 +26,7 @@ from telegram_ops import (
     clone_profile_and_channel,
     set_password_and_email,
     set_password_only,
+    wait_for_rambler_code,
 )
 
 load_dotenv()
@@ -457,8 +458,11 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
         store.update_account(account_id, **result)
         schedule_story_copy(chat_id, account_id, row["session"], project)
         await progress("Истории копируются в фоне — продолжаю привязку почты")
-        await progress("Меняю 2FA-пароль. Почту владелец привяжет вручную.")
-        await set_password_only(client, row["old_password"], store.get_setting("new_password"))
+        await progress("Меняю 2FA-пароль и автоматически привязываю почту")
+        async def code_provider(_code_length: int = 0) -> str:
+            return await wait_for_rambler_code(row["email"], row["email_password"])
+        await set_password_and_email(client, row["old_password"], store.get_setting("new_password"), row["email"], code_provider)
+        store.update_account(account_id, old_password=store.get_setting("new_password"))
         store.update_account(account_id, status="готов", error=None)
         final = store.account(account_id)
         await publish_result(chat_id, final, project["name"])
@@ -507,8 +511,11 @@ async def resume_existing_account(chat_id: int, admin_id: int, account_id: int, 
         schedule_story_copy(chat_id, account_id, row["session"], project, clear_existing=True)
         await progress("Истории копируются в фоне — продолжаю привязку почты")
 
-        await progress("Меняю 2FA-пароль. Почту владелец привяжет вручную.")
-        await set_password_only(client, row["old_password"], store.get_setting("new_password"))
+        await progress("Автоматически привязываю новую почту")
+        async def code_provider(_code_length: int = 0) -> str:
+            return await wait_for_rambler_code(row["email"], row["email_password"])
+        await set_password_and_email(client, store.get_setting("new_password"), store.get_setting("new_password"), row["email"], code_provider)
+        store.update_account(account_id, old_password=store.get_setting("new_password"))
         store.update_account(account_id, status="готов", error=None)
         await publish_result(chat_id, store.account(account_id), project["name"])
     except Exception as exc:
