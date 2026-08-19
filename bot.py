@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from telethon import functions, types
 from telethon.errors import SessionPasswordNeededError
 
+from dialoghub import connect_to_dialoghub
 from storage import Store
 from telegram_ops import (
     _copy_channel_posts,
@@ -475,6 +476,8 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
         state[admin_id] = ("email_code", account_id)
         await set_password_and_email(client, row["old_password"], store.get_setting("new_password"), row["email"], code_provider)
         store.update_account(account_id, old_password=store.get_setting("new_password"))
+        await progress("Подключаю аккаунт к DialogHub")
+        await connect_to_dialoghub(client, account_id, project["name"], API_ID, API_HASH)
         store.update_account(account_id, status="готов", error=None)
         final = store.account(account_id)
         await publish_result(chat_id, final, project["name"])
@@ -603,6 +606,8 @@ async def skip_email_binding(chat_id: int, admin_id: int, account_id: int) -> No
         with contextlib.suppress(Exception):
             await client(functions.account.CancelPasswordEmailRequest())
         await set_password_only(client, row["old_password"] or store.get_setting("new_password"), store.get_setting("new_password"))
+        await bot.send_message(chat_id, f"Аккаунт №{account_id}: подключаю аккаунт к DialogHub")
+        await connect_to_dialoghub(client, account_id, project["name"], API_ID, API_HASH)
         store.update_account(account_id, old_password=store.get_setting("new_password"), status="готов", error=None)
         await publish_result(chat_id, store.account(account_id), project["name"])
     except Exception as exc:
