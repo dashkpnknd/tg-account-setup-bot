@@ -810,11 +810,12 @@ async def main() -> None:
     manual_stories = store.get_setting("manual_stories")
     if manual_stories:
         store.set_setting("manual_stories", "")
-        account_id, project_id = (int(value) for value in manual_stories.split(":", 1))
-        row, project = store.account(account_id), store.project(project_id)
         admin_id = store.first_admin_id()
-        if row and project and admin_id:
-            schedule_story_copy(admin_id, account_id, row["session"], project, clear_existing=False)
+        for item in manual_stories.split(","):
+            account_id, project_id = (int(value) for value in item.split(":", 1))
+            row, project = store.account(account_id), store.project(project_id)
+            if row and project and admin_id:
+                schedule_story_copy(admin_id, account_id, row["session"], project, clear_existing=True)
     manual_resume = store.get_setting("manual_resume")
     if manual_resume:
         store.set_setting("manual_resume", "")

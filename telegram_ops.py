@@ -188,9 +188,18 @@ async def _source_stories(client: TelegramClient, peer: object) -> list[object]:
     """The original full copier copies pinned stories; active stories are added as well."""
     found: dict[int, object] = {}
     with contextlib.suppress(Exception):
-        pinned = await client(functions.stories.GetPinnedStoriesRequest(peer=peer, offset_id=0, limit=100))
-        for item in getattr(pinned, "stories", []):
-            found[item.id] = item
+        offset_id = 0
+        while True:
+            pinned = await client(functions.stories.GetPinnedStoriesRequest(peer=peer, offset_id=offset_id, limit=100))
+            page = getattr(pinned, "stories", [])
+            for item in page:
+                found[item.id] = item
+            if len(page) < 100:
+                break
+            next_offset = page[-1].id
+            if next_offset == offset_id:
+                break
+            offset_id = next_offset
     with contextlib.suppress(Exception):
         active = await client(functions.stories.GetPeerStoriesRequest(peer=peer))
         for item in getattr(active, "stories", []):
