@@ -195,7 +195,9 @@ async def _source_stories(client: TelegramClient, peer: object) -> list[object]:
         active = await client(functions.stories.GetPeerStoriesRequest(peer=peer))
         for item in getattr(active, "stories", []):
             found[item.id] = item
-    return list(found.values())
+    # Telegram returns newest-first in some endpoints. Copy chronologically so
+    # the first source story is also the first story on the new account.
+    return sorted(found.values(), key=lambda story: (getattr(story, "date", None), story.id))
 
 
 async def copy_full_stories(
@@ -315,17 +317,8 @@ async def clone_profile_and_channel(
             await progress("Скоплены цвета профиля")
             await _human_pause()
 
-    # Premium badge is shown by Telegram automatically. The additional custom
-    # Premium emoji next to the name is stored in `emoji_status`; replicate it
-    # from the source whenever it has one.
-    emoji_status = getattr(source_profile, "emoji_status", None)
-    if emoji_status:
-        try:
-            await client(functions.account.UpdateEmojiStatusRequest(emoji_status=emoji_status))
-            await progress("Скопирован Premium эмодзи-статус")
-            await _human_pause()
-        except Exception:
-            await progress("Не удалось скопировать Premium эмодзи-статус — продолжаю оформление")
+    # Do not copy the source profile's custom emoji status: every new account
+    # receives only its own randomly assigned business emoji in its name.
 
     account_username, channel_username = await choose_usernames(client, username_seed)
     await client(functions.account.UpdateUsernameRequest(account_username))

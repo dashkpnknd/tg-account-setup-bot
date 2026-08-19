@@ -73,6 +73,10 @@ def back() -> InlineKeyboardMarkup:
     return kb(("◀️ В меню", "home"))
 
 
+def email_wait_kb(account_id: int) -> InlineKeyboardMarkup:
+    return kb(("⏭️ Пропустить привязку почты", f"skip_email:{account_id}"), ("◀️ В меню", "home"))
+
+
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or store.is_admin(user_id)
 
@@ -429,6 +433,7 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
     if not project:
         return
     source_client = client_from_session(project["session"], API_ID, API_HASH) if project["source_account_id"] else client
+    store.set_setting(f"active_project:{account_id}", str(project_id))
     name_emoji = row["name_emoji"] or next(
         (emoji for emoji in random.sample(BUSINESS_EMOJIS, len(BUSINESS_EMOJIS)) if emoji not in store.used_name_emojis()),
         random.choice(BUSINESS_EMOJIS),
@@ -457,7 +462,12 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
         store.update_account(account_id, **result)
         schedule_story_copy(chat_id, account_id, row["session"], project)
         await progress("Истории копируются в фоне — продолжаю привязку почты")
-        await progress(f"Откройте почту {row['email']} и пришлите сюда код Telegram.\nПароль почты: {row['email_password']}")
+        await bot.send_message(
+            chat_id,
+            f"Аккаунт №{account_id}: откройте почту {row['email']} и пришлите сюда код Telegram.\n"
+            f"Пароль почты: {row['email_password']}",
+            reply_markup=email_wait_kb(account_id),
+        )
         async def code_provider(_code_length: int = 0) -> str:
             return await asyncio.wait_for(future, timeout=15 * 60)
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
@@ -555,6 +565,7 @@ async def bind_existing_email(chat_id: int, admin_id: int, account_id: int, proj
             f"Откройте: {row['email']}\nПароль: {row['email_password']}\n\n"
             "Когда придёт письмо Telegram, пришлите код сюда одним сообщением.",
         )
+        await bot.send_message(chat_id, "Если код не приходит, можно продолжить без привязки почты.", reply_markup=email_wait_kb(account_id))
 
         async def code_provider(_code_length: int = 0) -> str:
             return await asyncio.wait_for(future, timeout=15 * 60)
@@ -573,6 +584,43 @@ async def bind_existing_email(chat_id: int, admin_id: int, account_id: int, proj
             state.pop(admin_id, None)
         with contextlib.suppress(Exception):
             await client.disconnect()
+
+
+async def skip_email_binding(chat_id: int, admin_id: int, account_id: int) -> None:
+    """Cancel the pending email confirmation and finish the account without it."""
+    row = store.account(account_id)
+    project_id = int(store.get_setting(f"active_project:{account_id}", "0") or 0)
+    project = store.project(project_id)
+    if not row or not project:
+        await bot.send_message(chat_id, "Не удалось определить проект для этого аккаунта.")
+        return
+    future = email_code_waiters.get(admin_id)
+    if future and not future.done():
+        future.cancel()
+    client = client_from_session(row["session"], API_ID, API_HASH)
+    try:
+        await client.connect()
+        with contextlib.suppress(Exception):
+            await client(functions.account.CancelPasswordEmailRequest())
+        await set_password_only(client, row["old_password"] or store.get_setting("new_password"), store.get_setting("new_password"))
+        store.update_account(account_id, old_password=store.get_setting("new_password"), status="готов", error=None)
+        await publish_result(chat_id, store.account(account_id), project["name"])
+    except Exception as exc:
+        store.update_account(account_id, status="ошибка", error=str(exc)[:900])
+        await bot.send_message(chat_id, f"Не удалось пропустить привязку почты: {exc}")
+    finally:
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+
+
+@dp.callback_query(F.data.startswith("skip_email:"))
+async def skip_email(callback: CallbackQuery) -> None:
+    if not await ensure_admin(callback):
+        return
+    account_id = int(callback.data.split(":", 1)[1])
+    await callback.answer("Пропускаю привязку почты…")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    asyncio.create_task(skip_email_binding(callback.message.chat.id, callback.from_user.id, account_id))
 
 
 def display_phone(phone: str | None) -> str:
