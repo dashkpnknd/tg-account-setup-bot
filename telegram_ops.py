@@ -209,22 +209,43 @@ async def _source_stories(client: TelegramClient, peer: object) -> list[object]:
     return sorted(found.values(), key=lambda story: (getattr(story, "date", None), story.id))
 
 
+async def _target_story_count(client: TelegramClient) -> int:
+    """Count both archived/pinned and active target stories without duplicates."""
+    found: set[int] = set()
+    offset_id = 0
+    while True:
+        pinned = await client(
+            functions.stories.GetPinnedStoriesRequest(peer=types.InputPeerSelf(), offset_id=offset_id, limit=100)
+        )
+        page = getattr(pinned, "stories", [])
+        found.update(story.id for story in page)
+        if len(page) < 100:
+            break
+        offset_id = page[-1].id
+    active = await client(functions.stories.GetPeerStoriesRequest(peer=types.InputPeerSelf()))
+    found.update(story.id for story in getattr(active, "stories", []))
+    return len(found)
+
+
 async def copy_full_stories(
     source_client: TelegramClient,
     target_client: TelegramClient,
     source: object,
     progress: Progress,
-    interval_minutes: int,
+    interval_seconds: int,
 ) -> int:
     """Port of the FULL_CRM full-story approach: all pinned stories, pinned on target, in order."""
     stories = await _source_stories(source_client, source)
     if not stories:
         await progress("У источника нет доступных историй для полного копирования")
         return 0
+    # A restart must continue after the last successfully sent story rather
+    # than duplicate the beginning of the archive.
+    existing = min(await _target_story_count(target_client), len(stories))
     directory = Path(tempfile.mkdtemp(prefix="tg_stories_"))
-    copied = 0
+    copied = existing
     try:
-        for index, story in enumerate(stories, start=1):
+        for index, story in enumerate(stories[existing:], start=existing + 1):
             media = await _story_media(source_client, target_client, story, directory)
             if not media:
                 continue
@@ -246,11 +267,13 @@ async def copy_full_stories(
             except FloodWaitError as exc:
                 await asyncio.sleep(exc.seconds)
                 continue
-            except Exception:
+            except Exception as exc:
+                await progress(f"История {index}/{len(stories)} пропущена: {type(exc).__name__}")
                 continue
-            # Same paced full-copy behaviour as the existing bot; no delay after the last story.
-            if index < len(stories) and interval_minutes > 0:
-                await asyncio.sleep(interval_minutes * 60)
+            # A short variable pause is natural but does not make a large
+            # archive take days to copy.
+            if index < len(stories) and interval_seconds > 0:
+                await asyncio.sleep(random.uniform(interval_seconds * 0.7, interval_seconds * 1.3))
     finally:
         shutil.rmtree(directory, ignore_errors=True)
     return copied
@@ -263,7 +286,7 @@ async def copy_stories_in_background(
     api_id: int,
     api_hash: str,
     progress: Progress,
-    interval_minutes: int,
+    interval_seconds: int,
     clear_existing: bool = False,
 ) -> int:
     """Copy stories independently, so 2FA setup is never held up by long queues."""
@@ -281,7 +304,7 @@ async def copy_stories_in_background(
             if ids:
                 with contextlib.suppress(Exception):
                     await target(functions.stories.DeleteStoriesRequest(peer=types.InputPeerSelf(), id=ids))
-        return await copy_full_stories(source, target, source_profile, progress, interval_minutes)
+        return await copy_full_stories(source, target, source_profile, progress, interval_seconds)
     finally:
         with contextlib.suppress(Exception):
             await target.disconnect()

@@ -37,7 +37,8 @@ API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_IDS = {int(item) for item in os.environ.get("ADMIN_IDS", "").split(",") if item.strip().isdigit()}
-STORY_INTERVAL = max(0, int(os.environ.get("STORY_INTERVAL_MINUTES", "15")))
+# Stories are paced like manual edits, but a large archive must not take days.
+STORY_INTERVAL = max(20, int(os.environ.get("STORY_INTERVAL_SECONDS", "45")))
 BUSINESS_EMOJIS = ("💼", "📊", "📈", "📌", "📋", "🗂️", "🗓️", "📝", "🤝", "🏢", "💻", "📎", "🔖", "🧩", "🛠️")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
@@ -115,12 +116,30 @@ def schedule_story_copy(chat_id: int, account_id: int, target_session: str, proj
     async def progress(text: str) -> None:
         await progress_message(chat_id, f"Аккаунт №{account_id}: {text}")
 
-    task = asyncio.create_task(
-        copy_stories_in_background(
-            target_session, project["session"] if project["source_account_id"] else None,
-            project["source_username"], API_ID, API_HASH, progress, STORY_INTERVAL, clear_existing,
-        )
-    )
+    # Keep the job in SQLite.  The bot can be redeployed while a long story
+    # archive is being copied; the next process then resumes it automatically.
+    queue_key = f"story_queue:{account_id}"
+    store.set_setting(queue_key, f"{project['id']}:{1 if clear_existing else 0}")
+
+    async def run() -> None:
+        queued = store.get_setting(queue_key)
+        initial_clear = queued.endswith(":1")
+        if initial_clear:
+            # Mark it as cleared before uploads begin.  A restart after this
+            # point keeps already copied stories and resumes after them.
+            store.set_setting(queue_key, f"{project['id']}:0")
+        try:
+            await copy_stories_in_background(
+                target_session, project["session"] if project["source_account_id"] else None,
+                project["source_username"], API_ID, API_HASH, progress, STORY_INTERVAL, initial_clear,
+            )
+        except Exception:
+            log.exception("Story copy failed for account %s", account_id)
+            await progress("Копирование историй временно остановлено — продолжу после перезапуска бота")
+            return
+        store.set_setting(queue_key, "")
+
+    task = asyncio.create_task(run())
     story_jobs.add(task)
     task.add_done_callback(story_jobs.discard)
 
@@ -805,6 +824,22 @@ async def status(callback: CallbackQuery) -> None:
 
 
 async def main() -> None:
+    # Resume durable story queues first.  Existing target stories are used as
+    # the checkpoint, so copied stories are neither deleted nor duplicated.
+    admin_id = store.first_admin_id()
+    if admin_id:
+        for row in store.accounts():
+            queued = store.get_setting(f"story_queue:{row['id']}")
+            if not queued:
+                continue
+            try:
+                project_id, clear = (int(value) for value in queued.split(":", 1))
+            except ValueError:
+                store.set_setting(f"story_queue:{row['id']}", "")
+                continue
+            project = store.project(project_id)
+            if project:
+                schedule_story_copy(admin_id, row["id"], row["session"], project, clear_existing=bool(clear))
     manual_email_bind = store.get_setting("manual_email_bind")
     if manual_email_bind:
         store.set_setting("manual_email_bind", "")
