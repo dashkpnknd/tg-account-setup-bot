@@ -19,6 +19,7 @@ from telethon import functions, types
 from telethon.errors import SessionPasswordNeededError
 
 from dialoghub import connect_to_dialoghub
+from multicrm import hand_off_story_copy
 from storage import Store
 from telegram_ops import (
     _copy_channel_posts,
@@ -480,8 +481,9 @@ async def process_account(chat_id: int, admin_id: int, account_id: int, project_
             progress,
         )
         store.update_account(account_id, **result)
-        schedule_story_copy(chat_id, account_id, row["session"], project)
-        await progress("Истории копируются в фоне — продолжаю привязку почты")
+        await progress("Передаю истории в Multi CRM")
+        await hand_off_story_copy(client, project["source_username"])
+        await progress("Multi CRM начал полное копирование историй — продолжаю привязку почты")
         await bot.send_message(
             chat_id,
             f"Аккаунт №{account_id}: откройте почту {row['email']} и пришлите сюда код Telegram.\n"

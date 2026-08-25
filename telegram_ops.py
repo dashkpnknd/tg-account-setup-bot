@@ -202,7 +202,11 @@ async def _source_stories(client: TelegramClient, peer: object) -> list[object]:
             offset_id = next_offset
     with contextlib.suppress(Exception):
         active = await client(functions.stories.GetPeerStoriesRequest(peer=peer))
-        for item in getattr(active, "stories", []):
+        active_items = getattr(active, "stories", [])
+        # Telethon wraps the list in PeerStories on current Telegram layers.
+        if not isinstance(active_items, (list, tuple)):
+            active_items = getattr(active_items, "stories", [])
+        for item in active_items:
             found[item.id] = item
     # Telegram returns newest-first in some endpoints. Copy chronologically so
     # the first source story is also the first story on the new account.
@@ -223,7 +227,10 @@ async def _target_story_count(client: TelegramClient) -> int:
             break
         offset_id = page[-1].id
     active = await client(functions.stories.GetPeerStoriesRequest(peer=types.InputPeerSelf()))
-    found.update(story.id for story in getattr(active, "stories", []))
+    active_items = getattr(active, "stories", [])
+    if not isinstance(active_items, (list, tuple)):
+        active_items = getattr(active_items, "stories", [])
+    found.update(story.id for story in active_items)
     return len(found)
 
 
