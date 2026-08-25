@@ -15,9 +15,6 @@ from telethon import TelegramClient
 MULTICRM_ROOT = Path(os.environ.get("MULTICRM_ROOT", "/root/FULL_CRM"))
 MULTICRM_DB = MULTICRM_ROOT / "database.db"
 MULTICRM_SESSIONS = MULTICRM_ROOT / "accounts"
-MULTICRM_OWNER_ID = int(os.environ.get("MULTICRM_OWNER_ID", "888792903"))
-MULTICRM_API_ID = int(os.environ["MULTICRM_API_ID"])
-MULTICRM_API_HASH = os.environ["MULTICRM_API_HASH"]
 
 
 async def hand_off_story_copy(client: TelegramClient, source_username: str) -> str:
@@ -26,11 +23,14 @@ async def hand_off_story_copy(client: TelegramClient, source_username: str) -> s
     if not source_username:
         raise RuntimeError("не указан username источника для Multi CRM")
     me = await client.get_me()
+    owner_id = int(os.environ.get("MULTICRM_OWNER_ID", "888792903"))
+    api_id = int(os.environ["MULTICRM_API_ID"])
+    api_hash = os.environ["MULTICRM_API_HASH"]
     session_name = str(me.id)
     session_path = MULTICRM_SESSIONS / session_name
     MULTICRM_SESSIONS.mkdir(parents=True, exist_ok=True)
 
-    bridge = Client(str(session_path), api_id=MULTICRM_API_ID, api_hash=MULTICRM_API_HASH, no_updates=True)
+    bridge = Client(str(session_path), api_id=api_id, api_hash=api_hash, no_updates=True)
     try:
         await bridge.connect()
         await bridge.storage.dc_id(client.session.dc_id)
@@ -55,7 +55,7 @@ async def hand_off_story_copy(client: TelegramClient, source_username: str) -> s
                     phone=excluded.phone, username=excluded.username,
                     name=excluded.name, is_started=1
                 """,
-                (me.id, MULTICRM_OWNER_ID, me.phone or "", me.username or "", name, config),
+                (me.id, owner_id, me.phone or "", me.username or "", name, config),
             )
             existing = db.execute("SELECT id FROM full_story_cloner WHERE account_id=?", (me.id,)).fetchone()
             if not existing:
