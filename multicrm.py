@@ -63,7 +63,7 @@ async def hand_off_story_copy(client: TelegramClient, source_username: str) -> s
                     """
                     INSERT INTO full_story_cloner(account_id, username, interval, is_copy_prohibited,
                         publish_duration, skip_stories_with_at, copied)
-                    VALUES(?, ?, 1, 0, 6, 0, '[]')
+                    VALUES(?, ?, 15, 0, 6, 0, '[]')
                     """,
                     (me.id, source_username),
                 )

@@ -38,8 +38,8 @@ API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_IDS = {int(item) for item in os.environ.get("ADMIN_IDS", "").split(",") if item.strip().isdigit()}
-# Stories are paced like manual edits, but a large archive must not take days.
-STORY_INTERVAL = max(20, int(os.environ.get("STORY_INTERVAL_SECONDS", "45")))
+# Keep the requested human-like 15-minute interval between published stories.
+STORY_INTERVAL = max(1, int(os.environ.get("STORY_INTERVAL_MINUTES", "15"))) * 60
 BUSINESS_EMOJIS = ("💼", "📊", "📈", "📌", "📋", "🗂️", "🗓️", "📝", "🤝", "🏢", "💻", "📎", "🔖", "🧩", "🛠️")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
