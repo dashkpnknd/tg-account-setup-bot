@@ -17,7 +17,11 @@ MULTICRM_DB = MULTICRM_ROOT / "database.db"
 MULTICRM_SESSIONS = MULTICRM_ROOT / "accounts"
 
 
-async def hand_off_story_copy(client: TelegramClient, source_username: str) -> str:
+async def hand_off_story_copy(
+    client: TelegramClient,
+    source_username: str,
+    copied_story_ids: list[int] | None = None,
+) -> str:
     """Create a FULL_CRM account and its durable full-story task."""
     source_username = source_username.lstrip("@").strip()
     if not source_username:
@@ -67,6 +71,11 @@ async def hand_off_story_copy(client: TelegramClient, source_username: str) -> s
                     """,
                     (me.id, source_username),
                 )
+                if copied_story_ids:
+                    db.execute(
+                        "UPDATE full_story_cloner SET copied=? WHERE account_id=?",
+                        (json.dumps(copied_story_ids), me.id),
+                    )
 
     await asyncio.to_thread(register)
     return name
