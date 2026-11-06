@@ -6,3 +6,15 @@ __pycache__/
 *.py[cod]
 *.session*
 .DS_Store
+
+# Local runtime files
+backup-*/
+backups/
+*.log
+._*
+*.bak*
+*.before-*
+.env.*
+!.env.example
+*.sqlite*
+*.db*
